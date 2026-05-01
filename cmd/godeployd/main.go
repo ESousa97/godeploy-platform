@@ -14,6 +14,7 @@ import (
 
 	"github.com/docker/docker/client"
 
+	"godeploy-platform/internal/observability"
 	"godeploy-platform/internal/pipeline"
 	"godeploy-platform/internal/webhook"
 	_ "modernc.org/sqlite"
@@ -46,13 +47,13 @@ func main() {
 	defer docker.Close()
 
 	runner, err := pipeline.New(pipeline.Config{
-		DB:               db,
-		Docker:           docker,
-		NetworkName:      networkName,
+		DB:                 db,
+		Docker:             docker,
+		NetworkName:        networkName,
 		DefaultImagePrefix: getenv("GODEPLOY_IMAGE_PREFIX", "godeploy"),
-		HealthTimeout:    30 * time.Second,
-		HealthPath:       getenv("GODEPLOY_HEALTH_PATH", "/"),
-		Logger:           logger,
+		HealthTimeout:      30 * time.Second,
+		HealthPath:         getenv("GODEPLOY_HEALTH_PATH", "/"),
+		Logger:             logger,
 	})
 	if err != nil {
 		logger.Fatalf("pipeline: %v", err)
@@ -70,6 +71,8 @@ func main() {
 		_, _ = w.Write([]byte("ok"))
 	})
 	mux.HandleFunc("POST /webhook", s.handleWebhook)
+	mux.HandleFunc("GET /api/stats", observability.StatsHandler(observability.NewCollector(docker)))
+	mux.HandleFunc("GET /api/ws/logs", observability.NewLogsStreamer(docker).Handler())
 
 	httpSrv := &http.Server{
 		Addr:              addr,
@@ -136,13 +139,13 @@ func (s *server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
-		"provider":          ev.Provider,
-		"app":               ev.AppName,
-		"runtime":           string(res.Runtime),
-		"image_tag":         res.ImageTag,
-		"new_container_id":  res.NewContainerID,
-		"old_container_id":  res.OldContainerID,
-		"routed_target":     res.RoutedTarget,
+		"provider":         ev.Provider,
+		"app":              ev.AppName,
+		"runtime":          string(res.Runtime),
+		"image_tag":        res.ImageTag,
+		"new_container_id": res.NewContainerID,
+		"old_container_id": res.OldContainerID,
+		"routed_target":    res.RoutedTarget,
 	})
 }
 
@@ -152,4 +155,3 @@ func getenv(key, def string) string {
 	}
 	return def
 }
-
