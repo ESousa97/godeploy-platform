@@ -183,3 +183,21 @@ func (s *Store) LoadAll(ctx context.Context) (map[string]string, int64, error) {
 	return out, v, nil
 }
 
+// GetRoute retorna o target atual para um domain. Se não existir, ok=false.
+func (s *Store) GetRoute(ctx context.Context, domain string) (target string, ok bool, err error) {
+	domain = normalizeDomain(domain)
+	if domain == "" {
+		return "", false, errors.New("domain nao pode ser vazio")
+	}
+
+	var t string
+	row := s.db.QueryRowContext(ctx, `SELECT target FROM proxy_routes WHERE domain = ?`, domain)
+	if scanErr := row.Scan(&t); scanErr != nil {
+		if errors.Is(scanErr, sql.ErrNoRows) {
+			return "", false, nil
+		}
+		return "", false, fmt.Errorf("falha ao ler rota %q: %w", domain, scanErr)
+	}
+	return strings.TrimSpace(t), true, nil
+}
+

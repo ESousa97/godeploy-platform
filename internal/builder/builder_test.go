@@ -160,10 +160,17 @@ func TestBuildIntegration(t *testing.T) {
 func TestGitShortSHA(t *testing.T) {
 	tmpDir := t.TempDir()
 	
-	// No git repo
+	// No git repo.
+	// We use a non-existent GIT_DIR to ensure it doesn't find the parent repo.
+	os.Setenv("GIT_DIR", filepath.Join(tmpDir, ".notgit"))
+	defer os.Unsetenv("GIT_DIR")
+
 	if got := gitShortSHA(context.Background(), tmpDir); got != "" {
 		t.Errorf("expected empty string for non-git dir, got %q", got)
 	}
+
+	// Remove GIT_DIR for the next part of the test
+	os.Unsetenv("GIT_DIR")
 
 	// Initialize git repo
 	run := func(args ...string) {

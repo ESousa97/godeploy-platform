@@ -40,6 +40,12 @@ type DeploymentResult struct {
 	AssignedHostPort string
 }
 
+type DeployOptions struct {
+	// KeepOld, quando true, não para/remove o container antigo automaticamente.
+	// Útil para rollout com healthcheck e rollback via proxy.
+	KeepOld bool
+}
+
 type Scheduler struct {
 	docker      *client.Client
 	networkName string
@@ -107,6 +113,11 @@ func EnsurePaaSNetwork(ctx context.Context, docker *client.Client, networkName s
 // Deploy sobe uma nova versao com recursos limitados e remove a versao antiga
 // somente apos a nova estar em execucao (blue-green basico).
 func (s *Scheduler) Deploy(ctx context.Context, app App) (DeploymentResult, error) {
+	return s.DeployWithOptions(ctx, app, DeployOptions{})
+}
+
+// DeployWithOptions é o Deploy com opções adicionais (ex.: manter versão antiga).
+func (s *Scheduler) DeployWithOptions(ctx context.Context, app App, opts DeployOptions) (DeploymentResult, error) {
 	var out DeploymentResult
 
 	if err := app.validate(); err != nil {
@@ -200,6 +211,9 @@ func (s *Scheduler) Deploy(ctx context.Context, app App) (DeploymentResult, erro
 
 	if oldContainer != nil {
 		out.OldContainerID = oldContainer.ID
+		if opts.KeepOld {
+			return out, nil
+		}
 
 		timeout := int(defaultStopTimeout.Seconds())
 		if stopErr := s.docker.ContainerStop(ctx, oldContainer.ID, container.StopOptions{Timeout: &timeout}); stopErr != nil && !errdefs.IsNotFound(stopErr) {
