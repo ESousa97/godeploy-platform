@@ -12,6 +12,12 @@ import (
 	"strings"
 )
 
+// Provider values used in [Event.Provider].
+const (
+	ProviderGitHub = "github"
+	ProviderGitLab = "gitlab"
+)
+
 // Event is a normalized push notification from GitHub or GitLab.
 type Event struct {
 	// Provider is "github" or "gitlab".
@@ -90,7 +96,7 @@ func verifyGitHubSignature256(secret []byte, sigHeader string, body []byte) erro
 
 func parseGitHub(eventType string, body []byte) (Event, error) {
 	if strings.EqualFold(eventType, "ping") {
-		return Event{Provider: "github", Type: "ping"}, nil
+		return Event{Provider: ProviderGitHub, Type: "ping"}, nil
 	}
 	if !strings.EqualFold(eventType, "push") {
 		return Event{}, fmt.Errorf("evento GitHub nao suportado: %s", eventType)
@@ -120,7 +126,7 @@ func parseGitHub(eventType string, body []byte) (Event, error) {
 	ref := strings.TrimSpace(payload.Ref)
 	ref = strings.TrimPrefix(ref, "refs/heads/")
 	return Event{
-		Provider:  "github",
+		Provider:  ProviderGitHub,
 		Type:      "push",
 		AppName:   app,
 		CloneURL:  clone,
@@ -171,7 +177,7 @@ func parseGitLab(eventType string, body []byte) (Event, error) {
 	sha := strings.TrimSpace(payload.Checkout)
 
 	return Event{
-		Provider:  "gitlab",
+		Provider:  ProviderGitLab,
 		Type:      "push",
 		AppName:   app,
 		CloneURL:  clone,

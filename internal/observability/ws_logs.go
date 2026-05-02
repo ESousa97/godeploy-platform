@@ -19,6 +19,13 @@ import (
 	"godeploy-platform/internal/platform/iox"
 )
 
+// Stream values used in [LogMessage.Stream].
+const (
+	streamStdout = "stdout"
+	streamStderr = "stderr"
+	streamMeta   = "meta"
+)
+
 // LogMessage is one line streamed to WebSocket clients.
 type LogMessage struct {
 	Stream string `json:"stream"` // stdout|stderr|meta
@@ -96,7 +103,7 @@ func (s *LogsStreamer) Handler() http.HandlerFunc {
 			return conn.WriteJSON(msg)
 		}
 
-		if err := send(LogMessage{Stream: "meta", Line: "connected"}); err != nil {
+		if err := send(LogMessage{Stream: streamMeta, Line: "connected"}); err != nil {
 			return
 		}
 
@@ -108,7 +115,7 @@ func (s *LogsStreamer) Handler() http.HandlerFunc {
 			Tail:       "100",
 		})
 		if err != nil {
-			_ = send(LogMessage{Stream: "meta", Line: "erro ao abrir logs"}) //nolint:errcheck // client already misconfigured
+			_ = send(LogMessage{Stream: streamMeta, Line: "erro ao abrir logs"}) //nolint:errcheck // client already misconfigured
 			return
 		}
 		defer iox.Close(rc)
@@ -123,7 +130,7 @@ func (s *LogsStreamer) Handler() http.HandlerFunc {
 				case <-streamCtx.Done():
 					return
 				default:
-					if err := send(LogMessage{Stream: "stdout", Line: sc.Text()}); err != nil {
+					if err := send(LogMessage{Stream: streamStdout, Line: sc.Text()}); err != nil {
 						return
 					}
 				}
@@ -175,7 +182,7 @@ func (s *LogsStreamer) Handler() http.HandlerFunc {
 				return
 			case line, ok := <-stdoutCh:
 				if ok {
-					if err := send(LogMessage{Stream: "stdout", Line: line}); err != nil {
+					if err := send(LogMessage{Stream: streamStdout, Line: line}); err != nil {
 						return
 					}
 				} else {
@@ -183,7 +190,7 @@ func (s *LogsStreamer) Handler() http.HandlerFunc {
 				}
 			case line, ok := <-stderrCh:
 				if ok {
-					if err := send(LogMessage{Stream: "stderr", Line: line}); err != nil {
+					if err := send(LogMessage{Stream: streamStderr, Line: line}); err != nil {
 						return
 					}
 				} else {
@@ -191,7 +198,7 @@ func (s *LogsStreamer) Handler() http.HandlerFunc {
 				}
 			case demuxErr := <-demuxErrCh:
 				if demuxErr != nil {
-					_ = send(LogMessage{Stream: "meta", Line: "stream de logs encerrado"}) //nolint:errcheck // shutdown path
+					_ = send(LogMessage{Stream: streamMeta, Line: "stream de logs encerrado"}) //nolint:errcheck // shutdown path
 				}
 				return
 			}
