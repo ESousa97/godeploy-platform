@@ -83,11 +83,11 @@ func TestDetect(t *testing.T) {
 
 			for path, content := range tt.files {
 				fullPath := filepath.Join(tmpDir, path)
-				err := os.MkdirAll(filepath.Dir(fullPath), 0755)
+				err := os.MkdirAll(filepath.Dir(fullPath), 0o755)
 				if err != nil {
 					t.Fatalf("failed to create dir: %v", err)
 				}
-				err = os.WriteFile(fullPath, []byte(content), 0644)
+				err = os.WriteFile(fullPath, []byte(content), 0o644)
 				if err != nil {
 					t.Fatalf("failed to write file: %v", err)
 				}

@@ -8,6 +8,14 @@ import (
 	"strings"
 )
 
+// Marker file names recognised by [Detect].
+const (
+	markerGoMod       = "go.mod"
+	markerPackageJSON = "package.json"
+	markerIndexHTML   = "index.html"
+	markerDockerfile  = "Dockerfile"
+)
+
 // Runtime representa a linguagem/estrategia de build detectada.
 type Runtime string
 
@@ -60,18 +68,18 @@ func Detect(rootDir string) (Result, error) {
 	}
 
 	// Dockerfile (se existe no root, respeita o do usuário).
-	if exists(filepath.Join(rootDir, "Dockerfile")) {
-		return Result{Runtime: RuntimeDockerfile, Evidence: []string{"Dockerfile"}}, nil
+	if exists(filepath.Join(rootDir, markerDockerfile)) {
+		return Result{Runtime: RuntimeDockerfile, Evidence: []string{markerDockerfile}}, nil
 	}
 
 	// Go.
-	if exists(filepath.Join(rootDir, "go.mod")) {
-		return Result{Runtime: RuntimeGo, Evidence: []string{"go.mod"}}, nil
+	if exists(filepath.Join(rootDir, markerGoMod)) {
+		return Result{Runtime: RuntimeGo, Evidence: []string{markerGoMod}}, nil
 	}
 
 	// Node.js.
-	if exists(filepath.Join(rootDir, "package.json")) {
-		return Result{Runtime: RuntimeNodeJS, Evidence: []string{"package.json"}}, nil
+	if exists(filepath.Join(rootDir, markerPackageJSON)) {
+		return Result{Runtime: RuntimeNodeJS, Evidence: []string{markerPackageJSON}}, nil
 	}
 
 	// Python.
@@ -86,11 +94,11 @@ func Detect(rootDir string) (Result, error) {
 	}
 
 	// Static site.
-	if exists(filepath.Join(rootDir, "index.html")) {
-		return Result{Runtime: RuntimeStatic, Evidence: []string{"index.html"}}, nil
+	if exists(filepath.Join(rootDir, markerIndexHTML)) {
+		return Result{Runtime: RuntimeStatic, Evidence: []string{markerIndexHTML}}, nil
 	}
-	if exists(filepath.Join(rootDir, "public", "index.html")) {
-		return Result{Runtime: RuntimeStatic, Evidence: []string{filepath.ToSlash(filepath.Join("public", "index.html"))}}, nil
+	if exists(filepath.Join(rootDir, "public", markerIndexHTML)) {
+		return Result{Runtime: RuntimeStatic, Evidence: []string{filepath.ToSlash(filepath.Join("public", markerIndexHTML))}}, nil
 	}
 
 	return Result{}, errors.New("runtime nao detectado: nenhum marcador conhecido encontrado no diretorio raiz")
