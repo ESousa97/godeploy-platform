@@ -9,8 +9,10 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
+	"runtime"
 	"strings"
 	"time"
 
@@ -76,7 +78,9 @@ type RunResult struct {
 	RoutedTarget   string // host:port
 }
 
-// New constructs a [Runner] from cfg, ensuring proxy schema and Docker network exist.
+// New constructs a [Runner] from cfg, ensuring proxy schema. The PaaS Docker network
+// is created on the first deploy ([Runner.Run] -> scheduler), so godeployd can start
+// without a Docker socket until a webhook runs (e.g. distroless self-deploy).
 func New(cfg Config) (*Runner, error) {
 	if cfg.DB == nil {
 		return nil, errors.New("DB nao pode ser nil")
@@ -152,6 +156,8 @@ func (r *Runner) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 			r.cfg.Logger.Warn("tempdir cleanup", slog.Any("err", rmErr))
 		}
 	}()
+
+	r.warnIfLocalRepoDirty(ctx, req)
 
 	if cloneErr := gitClone(ctx, tmpDir, req.CloneURL, req.Ref); cloneErr != nil {
 		return out, cloneErr
@@ -309,7 +315,7 @@ func (r *Runner) safeRemoveContainer(ctx context.Context, id string) error {
 	return nil
 }
 
-func waitHTTP200(ctx context.Context, url string, timeout time.Duration) error {
+func waitHTTP200(ctx context.Context, target string, timeout time.Duration) error {
 	timeoutCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
@@ -333,9 +339,9 @@ func waitHTTP200(ctx context.Context, url string, timeout time.Duration) error {
 			if lastErr == nil {
 				lastErr = timeoutCtx.Err()
 			}
-			return fmt.Errorf("timeout aguardando 200 OK em %s: %w", url, lastErr)
+			return fmt.Errorf("timeout aguardando 200 OK em %s: %w", target, lastErr)
 		case <-ticker.C:
-			req, reqErr := http.NewRequestWithContext(timeoutCtx, http.MethodGet, url, http.NoBody)
+			req, reqErr := http.NewRequestWithContext(timeoutCtx, http.MethodGet, target, http.NoBody)
 			if reqErr != nil {
 				lastErr = reqErr
 				continue
@@ -435,4 +441,69 @@ func normalizeApp(name string) string {
 		return "app"
 	}
 	return name
+}
+
+// warnIfLocalRepoDirty avisa quando o pipeline esta clonando um repositorio
+// local (file://) cujo working tree contem alteracoes nao commitadas. O
+// git clone sempre copia o HEAD do remoto, entao mudancas nao commitadas
+// silenciosamente nao entram na imagem construida — uma fonte comum de
+// "porque o container subiu com o codigo errado?" ao testar self-deploy.
+func (r *Runner) warnIfLocalRepoDirty(ctx context.Context, req RunRequest) {
+	root, ok := localFileRepoRoot(req.CloneURL)
+	if !ok {
+		return
+	}
+	dirty, files, err := gitWorkingTreeDirty(ctx, root)
+	if err != nil || !dirty {
+		return
+	}
+	r.cfg.Logger.Warn(
+		"working tree do repositorio local com mudancas nao commitadas; o build vai usar apenas o HEAD",
+		slog.String("app", req.AppName),
+		slog.String("repo", root),
+		slog.String("ref", req.Ref),
+		slog.Int("dirty_files", files),
+	)
+}
+
+// localFileRepoRoot devolve o diretorio local apontado por uma cloneURL
+// `file://...`. Retorna ok=false para outros esquemas ou paths invalidos.
+func localFileRepoRoot(cloneURL string) (string, bool) {
+	cloneURL = strings.TrimSpace(cloneURL)
+	if cloneURL == "" {
+		return "", false
+	}
+	u, err := url.Parse(cloneURL)
+	if err != nil || !strings.EqualFold(u.Scheme, "file") {
+		return "", false
+	}
+	p := u.Path
+	// Em Windows file:///D:/foo, url.Path vem como "/D:/foo"; normaliza para "D:/foo".
+	if runtime.GOOS == "windows" && len(p) > 3 && p[0] == '/' && p[2] == ':' {
+		p = p[1:]
+	}
+	if p == "" {
+		return "", false
+	}
+	info, err := os.Stat(p)
+	if err != nil || !info.IsDir() {
+		return "", false
+	}
+	return p, true
+}
+
+// gitWorkingTreeDirty roda `git status --porcelain` em root e retorna se ha
+// arquivos modificados/staged/untracked, junto com a contagem.
+func gitWorkingTreeDirty(ctx context.Context, root string) (dirty bool, files int, err error) {
+	cmd := exec.CommandContext(ctx, "git", "status", "--porcelain")
+	cmd.Dir = root
+	out, runErr := cmd.Output()
+	if runErr != nil {
+		return false, 0, runErr
+	}
+	trimmed := strings.TrimRight(string(out), "\n")
+	if trimmed == "" {
+		return false, 0, nil
+	}
+	return true, strings.Count(trimmed, "\n") + 1, nil
 }

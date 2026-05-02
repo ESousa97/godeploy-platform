@@ -1,9 +1,11 @@
 package scheduler
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -14,13 +16,19 @@ import (
 	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/client"
+	"github.com/docker/docker/pkg/stdcopy"
 	"github.com/docker/go-connections/nat"
+
+	"godeploy-platform/internal/platform/iox"
 )
 
 const (
 	defaultMemoryLimitMB = int64(256)
 	defaultStopTimeout   = 15 * time.Second
 	startupTimeout       = 30 * time.Second
+	failedLogsTailLines  = "200"
+	failedLogsMaxBytes   = 16 * 1024
+	labelManagedTrue     = "true"
 )
 
 // App describes one deployable workload and its resource envelope.
@@ -70,17 +78,15 @@ func (e *ResourceConflictError) Error() string {
 	return fmt.Sprintf("conflito de %s (%s): %s", e.Resource, e.Value, e.Details)
 }
 
-// New returns a Scheduler after ensuring networkName exists on the Docker host.
-func New(ctx context.Context, docker *client.Client, networkName string) (*Scheduler, error) {
+// New returns a Scheduler. A rede networkName e criada na primeira [Scheduler.DeployWithOptions]
+// (via [EnsurePaaSNetwork]), para que componentes sem acesso ao Docker socket (ex.: godeployd dentro
+// de um contentor sem bind de /var/run/docker.sock) consigam arrancar o HTTP server e passar no healthcheck.
+func New(_ context.Context, docker *client.Client, networkName string) (*Scheduler, error) {
 	if docker == nil {
 		return nil, errors.New("docker client nao pode ser nil")
 	}
 	if strings.TrimSpace(networkName) == "" {
 		return nil, errors.New("networkName nao pode ser vazio")
-	}
-
-	if _, err := EnsurePaaSNetwork(ctx, docker, networkName); err != nil {
-		return nil, err
 	}
 
 	return &Scheduler{
@@ -101,7 +107,7 @@ func EnsurePaaSNetwork(ctx context.Context, docker *client.Client, networkName s
 
 	resp, err := docker.NetworkCreate(ctx, networkName, network.CreateOptions{
 		Labels: map[string]string{
-			"godeploy.managed": "true",
+			"godeploy.managed": labelManagedTrue,
 			"godeploy.network": networkName,
 		},
 	})
@@ -172,6 +178,11 @@ func (s *Scheduler) DeployWithOptions(ctx context.Context, app App, opts DeployO
 	}
 
 	if err := s.waitContainerRunning(ctx, createResp.ID); err != nil {
+		// Captura os logs antes do defer remover o container, para preservar o motivo real da falha.
+		tail := s.fetchContainerLogsTail(detach, createResp.ID)
+		if tail != "" {
+			return out, fmt.Errorf("novo container %q nao ficou running: %w; logs:\n%s", newContainerName, err, tail)
+		}
 		return out, fmt.Errorf("novo container %q nao ficou running: %w", newContainerName, err)
 	}
 	started = true
@@ -206,7 +217,7 @@ func (s *Scheduler) deployContainerSpecs(app App, appPort nat.Port, hostBinding 
 	containerConfig := &container.Config{
 		Image: app.Image,
 		Labels: map[string]string{
-			"godeploy.managed":  "true",
+			"godeploy.managed":  labelManagedTrue,
 			"godeploy.app.name": app.Name,
 		},
 		ExposedPorts: nat.PortSet{appPort: {}},
@@ -218,6 +229,10 @@ func (s *Scheduler) deployContainerSpecs(app App, appPort nat.Port, hostBinding 
 		},
 		PortBindings: nat.PortMap{appPort: []nat.PortBinding{hostBinding}},
 		NetworkMode:  container.NetworkMode(s.networkName),
+	}
+	if envTruthy(os.Getenv("GODEPLOY_BIND_DOCKER_SOCK")) {
+		// Permite correr godeployd (ou outras ferramentas) dentro do contentor com acesso ao motor Docker do host.
+		hostConfig.Binds = append(hostConfig.Binds, "/var/run/docker.sock:/var/run/docker.sock")
 	}
 	networkConfig := &network.NetworkingConfig{
 		EndpointsConfig: map[string]*network.EndpointSettings{
@@ -352,6 +367,39 @@ func (s *Scheduler) detectPortConflict(ctx context.Context, hostPort int) error 
 	return nil
 }
 
+// fetchContainerLogsTail tenta ler até [failedLogsTailLines] linhas dos logs de um container
+// recém criado que falhou em ficar running. Best-effort: nunca propaga erro do Docker; em caso
+// de falha retorna string vazia para que o caller mantenha apenas o erro original.
+func (s *Scheduler) fetchContainerLogsTail(ctx context.Context, containerID string) string {
+	logsCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	rc, err := s.docker.ContainerLogs(logsCtx, containerID, container.LogsOptions{
+		ShowStdout: true,
+		ShowStderr: true,
+		Tail:       failedLogsTailLines,
+	})
+	if err != nil {
+		return ""
+	}
+	defer iox.Close(rc)
+
+	var stdout, stderr bytes.Buffer
+	// stdcopy demultiplexa o stream multiplexado do Docker (stdout/stderr) quando o container nao usa TTY.
+	if _, err := stdcopy.StdCopy(&stdout, &stderr, rc); err != nil && stdout.Len() == 0 && stderr.Len() == 0 {
+		return ""
+	}
+
+	combined := strings.TrimSpace(strings.TrimSpace(stderr.String()) + "\n" + strings.TrimSpace(stdout.String()))
+	if combined == "" {
+		return ""
+	}
+	if len(combined) > failedLogsMaxBytes {
+		combined = "...(truncado)...\n" + combined[len(combined)-failedLogsMaxBytes:]
+	}
+	return combined
+}
+
 func (s *Scheduler) waitContainerRunning(ctx context.Context, containerID string) error {
 	timeoutCtx, cancel := context.WithTimeout(ctx, startupTimeout)
 	defer cancel()
@@ -399,6 +447,15 @@ func classifyCreateError(err error, containerName string, port int) error {
 	}
 
 	return fmt.Errorf("falha ao criar container: %w", err)
+}
+
+func envTruthy(v string) bool {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
 }
 
 func normalizeName(name string) string {
