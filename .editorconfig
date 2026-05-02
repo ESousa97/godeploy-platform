@@ -1,0 +1,29 @@
+root = true
+
+[*]
+indent_style = tab
+indent_size = 4
+end_of_line = lf
+charset = utf-8
+trim_trailing_whitespace = true
+insert_final_newline = true
+
+# Go: gofmt enforces tabs
+[*.go]
+indent_style = tab
+
+[*.{yml,yaml,json,toml}]
+indent_style = space
+indent_size = 2
+
+[*.md]
+indent_style = space
+indent_size = 2
+trim_trailing_whitespace = false
+
+[Makefile]
+indent_style = tab
+
+[Dockerfile]
+indent_style = space
+indent_size = 4

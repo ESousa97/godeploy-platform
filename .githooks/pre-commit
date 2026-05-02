@@ -1,0 +1,20 @@
+#!/bin/sh
+# Local quality gate (Etapa 4). Requires go, golangci-lint; -race needs CGO on some platforms.
+set -e
+ROOT=$(git rev-parse --show-toplevel)
+cd "$ROOT"
+if [ -n "$(gofmt -s -l .)" ]; then
+	echo "gofmt -s -l reported changes; run: make fmt" >&2
+	exit 1
+fi
+go vet ./...
+if command -v golangci-lint >/dev/null 2>&1; then
+	golangci-lint run ./...
+else
+	echo "warning: golangci-lint not in PATH; skipping" >&2
+fi
+if go env CGO_ENABLED | grep -q 1; then
+	go test -race -short ./...
+else
+	go test -short ./...
+fi

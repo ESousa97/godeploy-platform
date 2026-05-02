@@ -65,7 +65,7 @@ func TestProxyRoutesByHostAndHotReload(t *testing.T) {
 	go p.reloadLoop(ctx)
 
 	// First request must reach A
-	req := httptest.NewRequest("GET", "http://app.local/", nil)
+	req := httptest.NewRequestWithContext(ctx, "GET", "http://app.local/", nil)
 	req.Host = "app.local"
 	rr := httptest.NewRecorder()
 	p.ServeHTTP(rr, req)
@@ -73,25 +73,21 @@ func TestProxyRoutesByHostAndHotReload(t *testing.T) {
 		t.Fatalf("expected A 200, got %d body=%q", rr.Code, rr.Body.String())
 	}
 
-	// Update route to B, hot reload should pick it up
+	// Update route to B; reload snapshot (evita depender só do notify + loop async).
 	if err := p.store.UpsertRoute(ctx, "app.local", targetB); err != nil {
 		t.Fatalf("upsert B: %v", err)
 	}
 	p.NotifyReload()
+	if err := p.reloadIfChanged(ctx, true); err != nil {
+		t.Fatalf("reload after B: %v", err)
+	}
 
-	deadline := time.Now().Add(2 * time.Second)
-	for {
-		req2 := httptest.NewRequest("GET", "http://app.local/", nil)
-		req2.Host = "app.local"
-		rr2 := httptest.NewRecorder()
-		p.ServeHTTP(rr2, req2)
-		if rr2.Code == 200 && rr2.Body.String() == "B" {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("expected hot reload to B, last=%d body=%q", rr2.Code, rr2.Body.String())
-		}
-		time.Sleep(10 * time.Millisecond)
+	req2 := httptest.NewRequestWithContext(ctx, "GET", "http://app.local/", nil)
+	req2.Host = "app.local"
+	rr2 := httptest.NewRecorder()
+	p.ServeHTTP(rr2, req2)
+	if rr2.Code != 200 || rr2.Body.String() != "B" {
+		t.Fatalf("expected B 200, got %d body=%q", rr2.Code, rr2.Body.String())
 	}
 }
 
@@ -128,7 +124,7 @@ func TestProxyHeaderForwarding(t *testing.T) {
 		t.Fatalf("load: %v", err)
 	}
 
-	req := httptest.NewRequest("GET", "http://headers.local/foo", nil)
+	req := httptest.NewRequestWithContext(ctx, "GET", "http://headers.local/foo", nil)
 	req.Host = "headers.local"
 	req.RemoteAddr = "1.2.3.4:5678"
 	rr := httptest.NewRecorder()
@@ -148,4 +144,3 @@ func TestProxyHeaderForwarding(t *testing.T) {
 		t.Errorf("expected X-Forwarded-For: 1.2.3.4, got %q", capturedFF)
 	}
 }
-

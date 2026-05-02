@@ -12,9 +12,12 @@ import (
 	"strings"
 )
 
+// Event is a normalized push notification from GitHub or GitLab.
 type Event struct {
-	Provider string // "github" | "gitlab"
-	Type     string // push, etc
+	// Provider is "github" or "gitlab".
+	Provider string
+	// Type is the logical event name (for example "push" or "ping").
+	Type string
 
 	AppName   string
 	Domain    string
@@ -23,10 +26,14 @@ type Event struct {
 	CommitSHA string
 }
 
+// Parser validates webhook signatures when Secret is non-empty and decodes provider payloads.
 type Parser struct {
+	// Secret is the shared HMAC key (GitHub) or static token (GitLab).
 	Secret string
 }
 
+// Parse reads the request body, verifies the provider signature when configured,
+// and returns an [Event]. Unsupported event kinds yield a non-nil error.
 func (p Parser) Parse(r *http.Request) (Event, error) {
 	ghEvent := strings.TrimSpace(r.Header.Get("X-GitHub-Event"))
 	glEvent := strings.TrimSpace(r.Header.Get("X-Gitlab-Event"))
@@ -71,7 +78,9 @@ func verifyGitHubSignature256(secret []byte, sigHeader string, body []byte) erro
 		return errors.New("assinatura GitHub invalida (hex)")
 	}
 	mac := hmac.New(sha256.New, secret)
-	_, _ = mac.Write(body)
+	if _, err := mac.Write(body); err != nil {
+		return fmt.Errorf("hmac write: %w", err)
+	}
 	got := mac.Sum(nil)
 	if !hmac.Equal(got, want) {
 		return errors.New("assinatura GitHub invalida")
@@ -126,13 +135,13 @@ func parseGitLab(eventType string, body []byte) (Event, error) {
 	}
 
 	var payload struct {
-		Ref     string `json:"ref"`
+		Ref      string `json:"ref"`
 		Checkout string `json:"checkout_sha"`
-		Project struct {
-			Path     string `json:"path_with_namespace"`
-			Name     string `json:"name"`
-			HTTPURL  string `json:"http_url"`
-			GitHTTP  string `json:"git_http_url"`
+		Project  struct {
+			Path    string `json:"path_with_namespace"`
+			Name    string `json:"name"`
+			HTTPURL string `json:"http_url"`
+			GitHTTP string `json:"git_http_url"`
 		} `json:"project"`
 	}
 	if err := json.Unmarshal(body, &payload); err != nil {
@@ -170,4 +179,3 @@ func parseGitLab(eventType string, body []byte) (Event, error) {
 		CommitSHA: sha,
 	}, nil
 }
-

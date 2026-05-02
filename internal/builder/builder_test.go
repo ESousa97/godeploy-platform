@@ -12,7 +12,9 @@ import (
 
 	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/client"
+
 	"godeploy-platform/internal/detector"
+	"godeploy-platform/internal/integrationtest"
 )
 
 func TestResolveDockerfile(t *testing.T) {
@@ -32,7 +34,7 @@ func TestResolveDockerfile(t *testing.T) {
 	t.Run("User Dockerfile in Root", func(t *testing.T) {
 		dfPath := filepath.Join(tmpDir, "Dockerfile")
 		content := "FROM alpine\nRUN echo hello"
-		os.WriteFile(dfPath, []byte(content), 0644)
+		os.WriteFile(dfPath, []byte(content), 0o644)
 		defer os.Remove(dfPath)
 
 		got, err := b.resolveDockerfile(detector.RuntimeGo, tmpDir, "")
@@ -47,7 +49,7 @@ func TestResolveDockerfile(t *testing.T) {
 	t.Run("Explicit Dockerfile Path", func(t *testing.T) {
 		customDF := filepath.Join(tmpDir, "CustomDockerfile")
 		content := "FROM scratch"
-		os.WriteFile(customDF, []byte(content), 0644)
+		os.WriteFile(customDF, []byte(content), 0o644)
 		defer os.Remove(customDF)
 
 		got, err := b.resolveDockerfile(detector.RuntimeGo, tmpDir, customDF)
@@ -62,13 +64,13 @@ func TestResolveDockerfile(t *testing.T) {
 
 func TestCreateBuildContextTar(t *testing.T) {
 	tmpDir := t.TempDir()
-	
+
 	// Create some files
-	os.WriteFile(filepath.Join(tmpDir, "index.html"), []byte("hello"), 0644)
-	os.Mkdir(filepath.Join(tmpDir, ".git"), 0755)
-	os.WriteFile(filepath.Join(tmpDir, ".git", "config"), []byte("secret"), 0644)
-	os.Mkdir(filepath.Join(tmpDir, "node_modules"), 0755)
-	os.WriteFile(filepath.Join(tmpDir, "node_modules", "package.json"), []byte("{}"), 0644)
+	os.WriteFile(filepath.Join(tmpDir, "index.html"), []byte("hello"), 0o644)
+	os.Mkdir(filepath.Join(tmpDir, ".git"), 0o755)
+	os.WriteFile(filepath.Join(tmpDir, ".git", "config"), []byte("secret"), 0o644)
+	os.Mkdir(filepath.Join(tmpDir, "node_modules"), 0o755)
+	os.WriteFile(filepath.Join(tmpDir, "node_modules", "package.json"), []byte("{}"), 0o644)
 
 	dfContent := "FROM nginx:alpine"
 	reader, err := createBuildContextTar(tmpDir, "Dockerfile", dfContent)
@@ -113,10 +115,11 @@ func TestBuildIntegration(t *testing.T) {
 		t.Fatalf("failed to create docker client: %v", err)
 	}
 	defer cli.Close()
+	integrationtest.SkipIfDockerUnavailable(t, cli)
 
 	b, _ := New(cli)
 	tmpDir := t.TempDir()
-	os.WriteFile(filepath.Join(tmpDir, "index.html"), []byte("<h1>GoDeploy</h1>"), 0644)
+	os.WriteFile(filepath.Join(tmpDir, "index.html"), []byte("<h1>GoDeploy</h1>"), 0o644)
 
 	logs := make(chan string, 100)
 	opts := Options{
@@ -159,7 +162,7 @@ func TestBuildIntegration(t *testing.T) {
 
 func TestGitShortSHA(t *testing.T) {
 	tmpDir := t.TempDir()
-	
+
 	// No git repo.
 	// We use a non-existent GIT_DIR to ensure it doesn't find the parent repo.
 	os.Setenv("GIT_DIR", filepath.Join(tmpDir, ".notgit"))
@@ -174,7 +177,7 @@ func TestGitShortSHA(t *testing.T) {
 
 	// Initialize git repo
 	run := func(args ...string) {
-		cmd := exec.Command("git", args...)
+		cmd := exec.CommandContext(context.Background(), "git", args...)
 		cmd.Dir = tmpDir
 		if err := cmd.Run(); err != nil {
 			t.Logf("git %v failed: %v (skipping git test)", args, err)
@@ -185,7 +188,7 @@ func TestGitShortSHA(t *testing.T) {
 	run("init")
 	run("config", "user.email", "test@example.com")
 	run("config", "user.name", "test")
-	os.WriteFile(filepath.Join(tmpDir, "file"), []byte("data"), 0644)
+	os.WriteFile(filepath.Join(tmpDir, "file"), []byte("data"), 0o644)
 	run("add", "file")
 	run("commit", "-m", "initial commit")
 

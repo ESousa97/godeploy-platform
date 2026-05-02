@@ -6,16 +6,17 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
 	"strings"
 	"time"
 
+	cerrdefs "github.com/containerd/errdefs"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/client"
-	"github.com/docker/docker/errdefs"
 	"github.com/docker/go-connections/nat"
 
 	"godeploy-platform/internal/builder"
@@ -24,24 +25,30 @@ import (
 	"godeploy-platform/internal/scheduler"
 )
 
+// Config wires database, Docker, network defaults, health probing, and logging for [New].
 type Config struct {
+	// DB is the shared SQLite handle used by the proxy route store.
 	DB *sql.DB
 
+	// Docker is the Docker Engine API client.
 	Docker *client.Client
 
+	// NetworkName is the Docker bridge network for managed containers (default "godeploy").
 	NetworkName string
 
-	// DefaultImagePrefix ex.: "godeploy".
+	// DefaultImagePrefix is the repository prefix for built images (for example "godeploy").
 	DefaultImagePrefix string
 
-	// HealthTimeout default 30s.
+	// HealthTimeout bounds HTTP health checks against new containers (default 30s).
 	HealthTimeout time.Duration
-	// HealthPath default "/".
+	// HealthPath is the HTTP path probed on new containers before switching traffic (default "/").
 	HealthPath string
 
-	Logger *log.Logger
+	// Logger receives structured pipeline events; if nil, slog.Default is used.
+	Logger *slog.Logger
 }
 
+// Runner executes end-to-end deploy workflows (clone, build, schedule, route).
 type Runner struct {
 	cfg       Config
 	store     *proxy.Store
@@ -49,6 +56,7 @@ type Runner struct {
 	scheduler *scheduler.Scheduler
 }
 
+// RunRequest describes one deployment triggered by a webhook or operator.
 type RunRequest struct {
 	AppName    string
 	Domain     string
@@ -59,6 +67,7 @@ type RunRequest struct {
 	HealthPath string
 }
 
+// RunResult summarizes a successful [Runner.Run]: image tag, container IDs, and route target.
 type RunResult struct {
 	Runtime        detector.Runtime
 	ImageTag       string
@@ -67,12 +76,13 @@ type RunResult struct {
 	RoutedTarget   string // host:port
 }
 
+// New constructs a [Runner] from cfg, ensuring proxy schema and Docker network exist.
 func New(cfg Config) (*Runner, error) {
 	if cfg.DB == nil {
 		return nil, errors.New("DB nao pode ser nil")
 	}
 	if cfg.Docker == nil {
-		return nil, errors.New("Docker nao pode ser nil")
+		return nil, errors.New("docker nao pode ser nil")
 	}
 	if strings.TrimSpace(cfg.NetworkName) == "" {
 		cfg.NetworkName = "godeploy"
@@ -87,25 +97,25 @@ func New(cfg Config) (*Runner, error) {
 		cfg.HealthPath = "/"
 	}
 	if cfg.Logger == nil {
-		cfg.Logger = log.Default()
+		cfg.Logger = slog.Default()
 	}
 
 	store, err := proxy.NewStore(cfg.DB)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("route store: %w", err)
 	}
-	if err := store.EnsureSchema(context.Background()); err != nil {
-		return nil, err
+	if schemaErr := store.EnsureSchema(context.Background()); schemaErr != nil {
+		return nil, fmt.Errorf("ensure proxy schema: %w", schemaErr)
 	}
 
 	b, err := builder.New(cfg.Docker)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("builder: %w", err)
 	}
 
 	s, err := scheduler.New(context.Background(), cfg.Docker, cfg.NetworkName)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("scheduler: %w", err)
 	}
 
 	return &Runner{
@@ -116,6 +126,8 @@ func New(cfg Config) (*Runner, error) {
 	}, nil
 }
 
+// Run clones req.CloneURL, builds an image, deploys a new container with health checks,
+// updates the SQLite route for req.Domain, and removes the previous container on success.
 func (r *Runner) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 	var out RunResult
 
@@ -154,14 +166,20 @@ func (r *Runner) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 		return out, err
 	}
 
+	cleanupCtx := context.WithoutCancel(ctx)
+
 	tmpDir, err := os.MkdirTemp("", "godeploy-*")
 	if err != nil {
 		return out, fmt.Errorf("falha ao criar temp dir: %w", err)
 	}
-	defer func() { _ = os.RemoveAll(tmpDir) }()
+	defer func() {
+		if rmErr := os.RemoveAll(tmpDir); rmErr != nil {
+			r.cfg.Logger.Warn("tempdir cleanup", slog.Any("err", rmErr))
+		}
+	}()
 
-	if err := gitClone(ctx, tmpDir, req.CloneURL, req.Ref); err != nil {
-		return out, err
+	if cloneErr := gitClone(ctx, tmpDir, req.CloneURL, req.Ref); cloneErr != nil {
+		return out, cloneErr
 	}
 
 	detected, err := detector.Detect(tmpDir)
@@ -175,15 +193,15 @@ func (r *Runner) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 	buildLogs := make(chan string, 256)
 	go func() {
 		for line := range buildLogs {
-			r.cfg.Logger.Printf("build %s: %s", req.AppName, line)
+			r.cfg.Logger.Info("build", slog.String("app", req.AppName), slog.String("line", line))
 		}
 	}()
 
 	bres, err := r.builder.Build(ctx, builder.Options{
-		RootDir:    tmpDir,
-		ImageName:  req.ImageName,
-		Commit:     shortSHA(req.CommitSHA),
-		Logs:       buildLogs,
+		RootDir:   tmpDir,
+		ImageName: req.ImageName,
+		Commit:    shortSHA(req.CommitSHA),
+		Logs:      buildLogs,
 		// DockerfilePath vazio: respeita Dockerfile do repo, ou template do runtime.
 	})
 	if err != nil {
@@ -208,7 +226,9 @@ func (r *Runner) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 	if strings.TrimSpace(deployRes.AssignedHostPort) == "" {
 		fallback, ferr := inferPublishedPort(ctx, r.cfg.Docker, deployRes.NewContainerID, internalPort)
 		if ferr != nil {
-			_ = r.safeRemoveContainer(context.Background(), deployRes.NewContainerID)
+			if rmErr := r.safeRemoveContainer(cleanupCtx, deployRes.NewContainerID); rmErr != nil {
+				r.cfg.Logger.Warn("cleanup new container", slog.Any("err", rmErr))
+			}
 			return out, fmt.Errorf("falha ao resolver porta publicada do novo container: %w", ferr)
 		}
 		newTarget = fmt.Sprintf("127.0.0.1:%s", fallback)
@@ -216,19 +236,27 @@ func (r *Runner) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 
 	// Faz healthcheck direto no novo target antes de trocar a rota.
 	if err := waitHTTP200(ctx, "http://"+newTarget+healthPath, r.cfg.HealthTimeout); err != nil {
-		_ = r.safeRemoveContainer(context.Background(), deployRes.NewContainerID)
+		if rmErr := r.safeRemoveContainer(cleanupCtx, deployRes.NewContainerID); rmErr != nil {
+			r.cfg.Logger.Warn("cleanup new container", slog.Any("err", rmErr))
+		}
 		// Rota não foi alterada ainda, então rollback é manter como estava.
 		return out, fmt.Errorf("healthcheck falhou: %w", err)
 	}
 
 	// Troca rota do proxy para o novo container.
 	if err := r.store.UpsertRoute(ctx, req.Domain, newTarget); err != nil {
-		_ = r.safeRemoveContainer(context.Background(), deployRes.NewContainerID)
+		if rmErr := r.safeRemoveContainer(cleanupCtx, deployRes.NewContainerID); rmErr != nil {
+			r.cfg.Logger.Warn("cleanup new container", slog.Any("err", rmErr))
+		}
 		// tenta restaurar rota anterior (se existia)
 		if prevOK {
-			_ = r.store.UpsertRoute(context.Background(), req.Domain, prevTarget)
+			if upErr := r.store.UpsertRoute(cleanupCtx, req.Domain, prevTarget); upErr != nil {
+				r.cfg.Logger.Warn("rollback route", slog.Any("err", upErr))
+			}
 		} else {
-			_ = r.store.DeleteRoute(context.Background(), req.Domain)
+			if delErr := r.store.DeleteRoute(cleanupCtx, req.Domain); delErr != nil {
+				r.cfg.Logger.Warn("rollback delete route", slog.Any("err", delErr))
+			}
 		}
 		return out, err
 	}
@@ -237,8 +265,12 @@ func (r *Runner) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 	// Agora sim removemos o antigo (blue-green com readiness).
 	if deployRes.OldContainerID != "" {
 		timeout := 15
-		_ = r.cfg.Docker.ContainerStop(ctx, deployRes.OldContainerID, container.StopOptions{Timeout: &timeout})
-		_ = r.safeRemoveContainer(ctx, deployRes.OldContainerID)
+		if stopErr := r.cfg.Docker.ContainerStop(ctx, deployRes.OldContainerID, container.StopOptions{Timeout: &timeout}); stopErr != nil {
+			r.cfg.Logger.Warn("stop old container", slog.Any("err", stopErr))
+		}
+		if rmErr := r.safeRemoveContainer(ctx, deployRes.OldContainerID); rmErr != nil {
+			r.cfg.Logger.Warn("remove old container", slog.Any("err", rmErr))
+		}
 	}
 
 	return out, nil
@@ -249,7 +281,7 @@ func (r *Runner) safeRemoveContainer(ctx context.Context, id string) error {
 		return nil
 	}
 	err := r.cfg.Docker.ContainerRemove(ctx, id, container.RemoveOptions{Force: true})
-	if err != nil && !errdefs.IsNotFound(err) {
+	if err != nil && !cerrdefs.IsNotFound(err) {
 		return err
 	}
 	return nil
@@ -259,7 +291,16 @@ func waitHTTP200(ctx context.Context, url string, timeout time.Duration) error {
 	timeoutCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	client := &http.Client{Timeout: 5 * time.Second}
+	httpClient := &http.Client{
+		Timeout: 5 * time.Second,
+		Transport: &http.Transport{
+			DialContext:           (&net.Dialer{Timeout: 5 * time.Second}).DialContext,
+			TLSHandshakeTimeout:   5 * time.Second,
+			ResponseHeaderTimeout: 5 * time.Second,
+			IdleConnTimeout:       30 * time.Second,
+			MaxIdleConnsPerHost:   4,
+		},
+	}
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
 
@@ -272,14 +313,29 @@ func waitHTTP200(ctx context.Context, url string, timeout time.Duration) error {
 			}
 			return fmt.Errorf("timeout aguardando 200 OK em %s: %w", url, lastErr)
 		case <-ticker.C:
-			req, _ := http.NewRequestWithContext(timeoutCtx, http.MethodGet, url, nil)
-			resp, err := client.Do(req)
+			req, reqErr := http.NewRequestWithContext(timeoutCtx, http.MethodGet, url, http.NoBody)
+			if reqErr != nil {
+				lastErr = reqErr
+				continue
+			}
+			resp, err := httpClient.Do(req)
 			if err != nil {
 				lastErr = err
 				continue
 			}
-			_, _ = io.Copy(io.Discard, resp.Body)
-			_ = resp.Body.Close()
+			_, copyErr := io.Copy(io.Discard, resp.Body)
+			closeErr := resp.Body.Close()
+			if copyErr != nil {
+				lastErr = copyErr
+				if closeErr != nil {
+					lastErr = fmt.Errorf("%w: %w", copyErr, closeErr)
+				}
+				continue
+			}
+			if closeErr != nil {
+				lastErr = closeErr
+				continue
+			}
 			if resp.StatusCode == http.StatusOK {
 				return nil
 			}
@@ -358,4 +414,3 @@ func normalizeApp(name string) string {
 	}
 	return name
 }
-

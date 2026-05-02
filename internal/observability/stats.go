@@ -11,8 +11,11 @@ import (
 
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/client"
+
+	"godeploy-platform/internal/platform/iox"
 )
 
+// ContainerStat is one row of Docker usage telemetry returned by [Collector.Collect].
 type ContainerStat struct {
 	ID     string            `json:"id"`
 	Name   string            `json:"name"`
@@ -30,19 +33,23 @@ type ContainerStat struct {
 	CollectedAt time.Time `json:"collected_at"`
 }
 
+// StatsResponse aggregates container stats for JSON APIs.
 type StatsResponse struct {
 	Containers  []ContainerStat `json:"containers"`
 	CollectedAt time.Time       `json:"collected_at"`
 }
 
+// Collector pulls live stats from a Docker API client.
 type Collector struct {
 	docker *client.Client
 }
 
+// NewCollector wraps docker for [Collector.Collect].
 func NewCollector(docker *client.Client) *Collector {
 	return &Collector{docker: docker}
 }
 
+// Collect lists running containers and attaches CPU and memory utilization snapshots.
 func (c *Collector) Collect(ctx context.Context) (StatsResponse, error) {
 	now := time.Now().UTC()
 
@@ -82,7 +89,7 @@ func (c *Collector) collectOne(ctx context.Context, containerID string) (Contain
 	if err != nil {
 		return ContainerStat{}, err
 	}
-	defer resp.Body.Close()
+	defer iox.Close(resp.Body)
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -119,8 +126,8 @@ func (c *Collector) collectOne(ctx context.Context, containerID string) (Contain
 
 	cpuPercent := computeCPUPercent(v.CPUStats.SystemCPUUsage, v.PreCPUStats.SystemCPUUsage, v.CPUStats.CPUUsage.TotalUsage, v.PreCPUStats.CPUUsage.TotalUsage, v.CPUStats.OnlineCPUs, v.PreCPUStats.OnlineCPUs, v.CPUStats.CPUUsage.PercpuUsage)
 
-	usage := int64(v.MemoryStats.Usage)
-	limit := int64(v.MemoryStats.Limit)
+	usage := uint64ToInt64Saturating(v.MemoryStats.Usage)
+	limit := uint64ToInt64Saturating(v.MemoryStats.Limit)
 	memPercent := 0.0
 	if limit > 0 {
 		memPercent = (float64(usage) / float64(limit)) * 100.0
@@ -132,6 +139,14 @@ func (c *Collector) collectOne(ctx context.Context, containerID string) (Contain
 		MemLimitBytes: limit,
 		MemPercent:    clampPercent(memPercent),
 	}, nil
+}
+
+func uint64ToInt64Saturating(v uint64) int64 {
+	// Prevent overflow when converting uint64 -> int64 (gosec G115).
+	if v > uint64(math.MaxInt64) {
+		return math.MaxInt64
+	}
+	return int64(v)
 }
 
 func computeCPUPercent(systemNow, systemPrev, cpuNow, cpuPrev uint64, onlineNow, onlinePrev uint32, perCPU []uint64) float64 {

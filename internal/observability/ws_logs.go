@@ -14,29 +14,35 @@ import (
 	"github.com/docker/docker/client"
 	"github.com/docker/docker/pkg/stdcopy"
 	"github.com/gorilla/websocket"
+
+	"godeploy-platform/internal/middleware"
+	"godeploy-platform/internal/platform/iox"
 )
 
+// LogMessage is one line streamed to WebSocket clients.
 type LogMessage struct {
 	Stream string `json:"stream"` // stdout|stderr|meta
 	Line   string `json:"line"`
 }
 
+// LogsStreamer upgrades HTTP to WebSocket and tails container logs via Docker.
 type LogsStreamer struct {
-	docker *client.Client
+	docker         *client.Client
+	allowedOrigins []string
 }
 
-func NewLogsStreamer(docker *client.Client) *LogsStreamer {
-	return &LogsStreamer{docker: docker}
+// NewLogsStreamer creates a log WebSocket handler. allowedOrigins lists extra
+// browser Origins permitted in addition to same-host requests (see middleware.WSCheckOrigin).
+func NewLogsStreamer(docker *client.Client, allowedOrigins []string) *LogsStreamer {
+	return &LogsStreamer{docker: docker, allowedOrigins: allowedOrigins}
 }
 
+// Handler returns an [http.HandlerFunc] for GET /api/ws/logs?container=...
 func (s *LogsStreamer) Handler() http.HandlerFunc {
 	upgrader := websocket.Upgrader{
 		ReadBufferSize:  1024,
 		WriteBufferSize: 1024,
-		CheckOrigin: func(r *http.Request) bool {
-			// Ambiente local / PaaS simples: aceita qualquer origin.
-			return true
-		},
+		CheckOrigin:     middleware.WSCheckOrigin(s.allowedOrigins),
 	}
 
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -59,7 +65,7 @@ func (s *LogsStreamer) Handler() http.HandlerFunc {
 		if err != nil {
 			return
 		}
-		defer conn.Close()
+		defer iox.Close(conn)
 
 		// Cancelamento quando socket fechar.
 		streamCtx, stop := context.WithCancel(r.Context())
@@ -67,9 +73,11 @@ func (s *LogsStreamer) Handler() http.HandlerFunc {
 
 		// Leitor de controle (pings/close) para detectar desconexão.
 		conn.SetReadLimit(1024)
-		_ = conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+		if err := conn.SetReadDeadline(time.Now().Add(60 * time.Second)); err != nil {
+			return
+		}
 		conn.SetPongHandler(func(string) error {
-			_ = conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+			_ = conn.SetReadDeadline(time.Now().Add(60 * time.Second)) //nolint:errcheck // pong: best-effort
 			return nil
 		})
 		go func() {
@@ -88,7 +96,9 @@ func (s *LogsStreamer) Handler() http.HandlerFunc {
 			return conn.WriteJSON(msg)
 		}
 
-		_ = send(LogMessage{Stream: "meta", Line: "connected"})
+		if err := send(LogMessage{Stream: "meta", Line: "connected"}); err != nil {
+			return
+		}
 
 		rc, err := s.docker.ContainerLogs(streamCtx, containerRef, container.LogsOptions{
 			ShowStdout: true,
@@ -98,10 +108,10 @@ func (s *LogsStreamer) Handler() http.HandlerFunc {
 			Tail:       "100",
 		})
 		if err != nil {
-			_ = send(LogMessage{Stream: "meta", Line: "erro ao abrir logs: " + err.Error()})
+			_ = send(LogMessage{Stream: "meta", Line: "erro ao abrir logs"}) //nolint:errcheck // client already misconfigured
 			return
 		}
-		defer rc.Close()
+		defer iox.Close(rc)
 
 		// Se o container foi criado com TTY, o stream não é multiplexado.
 		if inspect.Config != nil && inspect.Config.Tty {
@@ -113,7 +123,9 @@ func (s *LogsStreamer) Handler() http.HandlerFunc {
 				case <-streamCtx.Done():
 					return
 				default:
-					_ = send(LogMessage{Stream: "stdout", Line: sc.Text()})
+					if err := send(LogMessage{Stream: "stdout", Line: sc.Text()}); err != nil {
+						return
+					}
 				}
 			}
 			return
@@ -126,8 +138,8 @@ func (s *LogsStreamer) Handler() http.HandlerFunc {
 		demuxErrCh := make(chan error, 1)
 		go func() {
 			_, demuxErr := stdcopy.StdCopy(stdoutW, stderrW, rc)
-			_ = stdoutW.Close()
-			_ = stderrW.Close()
+			iox.Close(stdoutW)
+			iox.Close(stderrW)
 			if demuxErr != nil && !errors.Is(demuxErr, context.Canceled) {
 				demuxErrCh <- demuxErr
 				return
@@ -135,7 +147,7 @@ func (s *LogsStreamer) Handler() http.HandlerFunc {
 			demuxErrCh <- nil
 		}()
 
-		readStream := func(stream string, rd io.Reader) <-chan string {
+		readStream := func(rd io.Reader) <-chan string {
 			ch := make(chan string, 64)
 			go func() {
 				defer close(ch)
@@ -154,8 +166,8 @@ func (s *LogsStreamer) Handler() http.HandlerFunc {
 			return ch
 		}
 
-		stdoutCh := readStream("stdout", stdoutR)
-		stderrCh := readStream("stderr", stderrR)
+		stdoutCh := readStream(stdoutR)
+		stderrCh := readStream(stderrR)
 
 		for {
 			select {
@@ -163,19 +175,23 @@ func (s *LogsStreamer) Handler() http.HandlerFunc {
 				return
 			case line, ok := <-stdoutCh:
 				if ok {
-					_ = send(LogMessage{Stream: "stdout", Line: line})
+					if err := send(LogMessage{Stream: "stdout", Line: line}); err != nil {
+						return
+					}
 				} else {
 					stdoutCh = nil
 				}
 			case line, ok := <-stderrCh:
 				if ok {
-					_ = send(LogMessage{Stream: "stderr", Line: line})
+					if err := send(LogMessage{Stream: "stderr", Line: line}); err != nil {
+						return
+					}
 				} else {
 					stderrCh = nil
 				}
 			case demuxErr := <-demuxErrCh:
 				if demuxErr != nil {
-					_ = send(LogMessage{Stream: "meta", Line: "demux erro: " + demuxErr.Error()})
+					_ = send(LogMessage{Stream: "meta", Line: "stream de logs encerrado"}) //nolint:errcheck // shutdown path
 				}
 				return
 			}

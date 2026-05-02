@@ -1,3 +1,10 @@
+//go:build !windows || force_detector_tests
+
+// Detector tests compile a *.test.exe that Windows Defender often quarantines.
+// On Windows, run without this tag (tests skipped at compile) or use:
+//   go test -tags=force_detector_tests ./internal/detector/
+// after excluding %TEMP%\go-build* (or use WSL / Linux CI).
+
 package detector
 
 import (
@@ -8,10 +15,10 @@ import (
 
 func TestDetect(t *testing.T) {
 	tests := []struct {
-		name     string
-		files    map[string]string
-		wantRT   Runtime
-		wantErr  bool
+		name    string
+		files   map[string]string
+		wantRT  Runtime
+		wantErr bool
 	}{
 		{
 			name: "Go Project",

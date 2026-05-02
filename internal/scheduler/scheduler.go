@@ -9,12 +9,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/docker/docker/api/types"
+	cerrdefs "github.com/containerd/errdefs"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/client"
-	"github.com/docker/docker/errdefs"
 	"github.com/docker/go-connections/nat"
 )
 
@@ -24,15 +23,21 @@ const (
 	startupTimeout       = 30 * time.Second
 )
 
-// App descreve uma aplicacao gerenciada pela PaaS.
+// App describes one deployable workload and its resource envelope.
 type App struct {
-	Name         string
-	Image        string
+	// Name is a stable identifier used for container naming and labels.
+	Name string
+	// Image is the fully qualified image reference to run.
+	Image string
+	// InternalPort is the container TCP port published to a host port.
 	InternalPort int
-	CPULimit     float64 // Ex.: 0.5 = meio core.
-	MemoryLimit  int64   // Em MB. Se zero, usa 256MB.
+	// CPULimit caps CPU usage (for example 0.5 for half a core).
+	CPULimit float64
+	// MemoryLimit is the memory cap in megabytes; zero defaults to 256MB.
+	MemoryLimit int64
 }
 
+// DeploymentResult captures identifiers and networking after a deploy attempt.
 type DeploymentResult struct {
 	NewContainerID   string
 	NewContainerName string
@@ -40,28 +45,32 @@ type DeploymentResult struct {
 	AssignedHostPort string
 }
 
+// DeployOptions tweaks rollout behavior for blue-green flows.
 type DeployOptions struct {
-	// KeepOld, quando true, não para/remove o container antigo automaticamente.
-	// Útil para rollout com healthcheck e rollback via proxy.
+	// KeepOld, when true, leaves the previous container running for health checks and rollback.
 	KeepOld bool
 }
 
+// Scheduler coordinates Docker operations for godeploy-managed apps.
 type Scheduler struct {
 	docker      *client.Client
 	networkName string
 }
 
-// ResourceConflictError representa conflitos comuns de deploy.
+// ResourceConflictError is returned when Docker reports a name or host port collision
+// relevant to godeploy scheduling.
 type ResourceConflictError struct {
 	Resource string
 	Value    string
 	Details  string
 }
 
+// Error implements the [error] interface.
 func (e *ResourceConflictError) Error() string {
 	return fmt.Sprintf("conflito de %s (%s): %s", e.Resource, e.Value, e.Details)
 }
 
+// New returns a Scheduler after ensuring networkName exists on the Docker host.
 func New(ctx context.Context, docker *client.Client, networkName string) (*Scheduler, error) {
 	if docker == nil {
 		return nil, errors.New("docker client nao pode ser nil")
@@ -98,7 +107,7 @@ func EnsurePaaSNetwork(ctx context.Context, docker *client.Client, networkName s
 	})
 	if err != nil {
 		// Corrida entre schedulers: outro processo pode ter criado a rede.
-		if errdefs.IsConflict(err) {
+		if cerrdefs.IsConflict(err) {
 			existingID, lookupErr := findNetworkByName(ctx, docker, networkName)
 			if lookupErr == nil && existingID != "" {
 				return existingID, nil
@@ -187,12 +196,13 @@ func (s *Scheduler) DeployWithOptions(ctx context.Context, app App, opts DeployO
 	out.NewContainerID = createResp.ID
 	out.NewContainerName = newContainerName
 
+	detach := context.WithoutCancel(ctx)
 	started := false
 	defer func() {
 		if started {
 			return
 		}
-		_ = s.docker.ContainerRemove(context.Background(), createResp.ID, container.RemoveOptions{Force: true})
+		_ = s.docker.ContainerRemove(detach, createResp.ID, container.RemoveOptions{Force: true}) //nolint:errcheck // best-effort teardown
 	}()
 
 	if err := s.docker.ContainerStart(ctx, createResp.ID, container.StartOptions{}); err != nil {
@@ -216,11 +226,11 @@ func (s *Scheduler) DeployWithOptions(ctx context.Context, app App, opts DeployO
 		}
 
 		timeout := int(defaultStopTimeout.Seconds())
-		if stopErr := s.docker.ContainerStop(ctx, oldContainer.ID, container.StopOptions{Timeout: &timeout}); stopErr != nil && !errdefs.IsNotFound(stopErr) {
+		if stopErr := s.docker.ContainerStop(ctx, oldContainer.ID, container.StopOptions{Timeout: &timeout}); stopErr != nil && !cerrdefs.IsNotFound(stopErr) {
 			return out, fmt.Errorf("novo container ativo, mas falha ao parar antigo %q: %w", oldContainer.ID, stopErr)
 		}
 
-		if rmErr := s.docker.ContainerRemove(ctx, oldContainer.ID, container.RemoveOptions{Force: true}); rmErr != nil && !errdefs.IsNotFound(rmErr) {
+		if rmErr := s.docker.ContainerRemove(ctx, oldContainer.ID, container.RemoveOptions{Force: true}); rmErr != nil && !cerrdefs.IsNotFound(rmErr) {
 			return out, fmt.Errorf("novo container ativo, mas falha ao remover antigo %q: %w", oldContainer.ID, rmErr)
 		}
 	}
@@ -280,7 +290,7 @@ func findNetworkByName(ctx context.Context, docker *client.Client, networkName s
 	return "", nil
 }
 
-func (s *Scheduler) findCurrentContainer(ctx context.Context, appName string) (*types.Container, error) {
+func (s *Scheduler) findCurrentContainer(ctx context.Context, appName string) (*container.Summary, error) {
 	args := filters.NewArgs()
 	args.Add("label", "godeploy.managed=true")
 	args.Add("label", fmt.Sprintf("godeploy.app.name=%s", appName))
@@ -303,13 +313,13 @@ func (s *Scheduler) findCurrentContainer(ctx context.Context, appName string) (*
 
 	for _, c := range containers {
 		if strings.EqualFold(c.State, "running") {
-			copy := c
-			return &copy, nil
+			chosen := c
+			return &chosen, nil
 		}
 	}
 
-	copy := containers[0]
-	return &copy, nil
+	fallback := containers[0]
+	return &fallback, nil
 }
 
 func (s *Scheduler) detectPortConflict(ctx context.Context, hostPort int) error {
@@ -362,7 +372,7 @@ func (s *Scheduler) waitContainerRunning(ctx context.Context, containerID string
 func classifyCreateError(err error, containerName string, port int) error {
 	msg := strings.ToLower(err.Error())
 
-	if errdefs.IsConflict(err) && strings.Contains(msg, "already in use") {
+	if cerrdefs.IsConflict(err) && strings.Contains(msg, "already in use") {
 		return &ResourceConflictError{
 			Resource: "nome",
 			Value:    containerName,

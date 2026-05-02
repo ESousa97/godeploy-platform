@@ -7,6 +7,8 @@ import (
 
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/client"
+
+	"godeploy-platform/internal/integrationtest"
 )
 
 func TestAppValidate(t *testing.T) {
@@ -139,12 +141,14 @@ func TestIntegration(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
+	detach := context.WithoutCancel(ctx)
 
 	cli, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
 	if err != nil {
 		t.Fatalf("Failed to create docker client: %v", err)
 	}
 	defer cli.Close()
+	integrationtest.SkipIfDockerUnavailable(t, cli)
 
 	networkName := "godeploy-test-net"
 	s, err := New(ctx, cli, networkName)
@@ -154,8 +158,7 @@ func TestIntegration(t *testing.T) {
 
 	// Clean up network and containers after test
 	defer func() {
-		cleanupCtx := context.Background()
-		_ = cli.NetworkRemove(cleanupCtx, networkName)
+		_ = cli.NetworkRemove(detach, networkName) //nolint:errcheck // best-effort test teardown
 	}()
 
 	appName := "test-integration-app"
@@ -188,7 +191,7 @@ func TestIntegration(t *testing.T) {
 
 		defer func() {
 			if t.Failed() {
-				_ = cli.ContainerRemove(context.Background(), res.NewContainerID, container.RemoveOptions{Force: true})
+				_ = cli.ContainerRemove(detach, res.NewContainerID, container.RemoveOptions{Force: true}) //nolint:errcheck // best-effort cleanup on failure
 			}
 		}()
 	})
@@ -221,6 +224,6 @@ func TestIntegration(t *testing.T) {
 		}
 
 		// Clean up
-		_ = cli.ContainerRemove(context.Background(), res.NewContainerID, container.RemoveOptions{Force: true})
+		_ = cli.ContainerRemove(detach, res.NewContainerID, container.RemoveOptions{Force: true}) //nolint:errcheck // best-effort cleanup after subtest
 	})
 }

@@ -1,0 +1,77 @@
+version: "2"
+
+run:
+  timeout: 5m
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+
+linters:
+  default: none
+  enable:
+    - bodyclose
+    - contextcheck
+    - dupl
+    - durationcheck
+    - errcheck
+    - errname
+    - errorlint
+    - exhaustive
+    - goconst
+    - gocritic
+    - godot
+    - gosec
+    - govet
+    - ineffassign
+    - misspell
+    - nilerr
+    - noctx
+    - prealloc
+    - predeclared
+    - revive
+    - sqlclosecheck
+    - staticcheck
+    - unconvert
+    - unparam
+    - unused
+    - wastedassign
+  settings:
+    errcheck:
+      check-type-assertions: true
+      check-blank: true
+    exhaustive:
+      default-signifies-exhaustive: true
+    gocritic:
+      enabled-tags:
+        - diagnostic
+        - style
+        - performance
+      disabled-checks:
+        - hugeParam
+        - rangeValCopy
+    govet:
+      enable-all: true
+      disable:
+        - fieldalignment
+        - shadow
+    revive:
+      rules:
+        - name: exported
+          arguments:
+            - "checkPrivateReceivers"
+        - name: unexported-return
+          disabled: true
+  exclusions:
+    rules:
+      - path: _test\.go
+        linters:
+          - dupl
+          - goconst
+          - gosec
+          - errcheck
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0

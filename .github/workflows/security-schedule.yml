@@ -1,0 +1,24 @@
+name: security-scheduled
+
+# Weekly vulnerability scan (plan_go.md ETAPA 5 — optional scheduled audit).
+on:
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  govulncheck:
+    runs-on: ubuntu-latest
+    # Same policy as ci.yml vulncheck: visible signal without blocking while upstream OSVs lack fixed tags.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...

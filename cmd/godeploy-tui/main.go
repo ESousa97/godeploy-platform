@@ -15,7 +15,16 @@ import (
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/client"
+
+	"godeploy-platform/internal/platform/iox"
+	"godeploy-platform/internal/platform/sqlpool"
+
 	_ "modernc.org/sqlite"
+)
+
+const (
+	healthLabelHealthy   = "Healthy"
+	healthLabelUnhealthy = "Unhealthy"
 )
 
 var baseStyle = lipgloss.NewStyle().
@@ -71,28 +80,29 @@ func (m *model) refresh() error {
 	if err != nil {
 		return err
 	}
-	defer db.Close()
+	sqlpool.ForSQLite(db)
+	defer iox.Close(db)
 
 	docker, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
 	if err != nil {
 		return err
 	}
-	defer docker.Close()
+	defer iox.Close(docker)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	// 1. Get routes from DB
-	rows, err := db.QueryContext(ctx, "SELECT domain, target FROM proxy_routes")
+	rows, err := db.QueryContext(ctx, "SELECT domain, target FROM proxy_routes") //nolint:sqlclosecheck // rows closed in defer below
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
+	defer iox.Close(rows)
 
 	domainToTarget := make(map[string]string)
 	for rows.Next() {
 		var d, t string
-		if err := rows.Scan(&d, &t); err == nil {
+		if scanErr := rows.Scan(&d, &t); scanErr == nil {
 			domainToTarget[d] = t
 		}
 	}
@@ -114,11 +124,9 @@ func (m *model) refresh() error {
 		}
 
 		status := c.Status
-		health := "Unknown"
+		health := healthLabelUnhealthy
 		if strings.Contains(strings.ToLower(c.State), "running") {
-			health = "Healthy"
-		} else {
-			health = "Unhealthy"
+			health = healthLabelHealthy
 		}
 
 		// Find domain for this app
@@ -139,7 +147,7 @@ func (m *model) refresh() error {
 
 		if existing, ok := appMap[name]; ok {
 			// If we have multiple containers for the same app name, prefer the running one
-			if health == "Healthy" || existing.Health != "Healthy" {
+			if health == healthLabelHealthy || existing.Health != healthLabelHealthy {
 				appMap[name] = &appInfo{Name: name, Domain: domain, Status: status, Health: health}
 			}
 		} else {
@@ -190,7 +198,9 @@ func main() {
 	t.SetStyles(s)
 
 	m := model{table: t}
-	_ = m.refresh() // initial load
+	if err := m.refresh(); err != nil {
+		log.Printf("refresh inicial: %v", err)
+	}
 
 	p := tea.NewProgram(m)
 	if _, err := p.Run(); err != nil {

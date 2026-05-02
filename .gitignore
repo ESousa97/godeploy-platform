@@ -1,6 +1,8 @@
 # Go
+# vendor/ opcional se passar a usar vendor
 bin/
 dist/
+build/
 *.exe
 *.exe~
 *.dll
@@ -8,17 +10,24 @@ dist/
 *.dylib
 *.test
 *.out
+coverage.txt
+coverage.html
+coverage.prof
+cover.out
+# Ad-hoc coverage output dirs (local tooling)
+cover/
+coverage/
 
 # Editor/IDE
 .idea/
 .vscode/
+*.swp
+*.swo
+*~
 
 # OS
 .DS_Store
 Thumbs.db
-
-# Git / build context noise
-.git/
 
 # Node (caso exista em apps detectadas)
 node_modules/
@@ -26,4 +35,23 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
+
+# Internal docs (not committed)
+BASELINE.md
+FINAL.md
+plan_go.md
+
+# Local runtime artifacts
+*.db
+
+# Env files
+.env
+.env.local
+.env.*.local
+
+# Temp
+tmp/
+*.tmp
+__debug_bin*
+debug.test
 

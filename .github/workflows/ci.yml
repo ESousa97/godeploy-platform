@@ -4,8 +4,15 @@ on:
   push:
   pull_request:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  test:
+  lint:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -13,6 +20,52 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
-      - name: Unit tests (short)
-        run: go test -short ./...
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: latest
+          args: --timeout=5m
 
+  vulncheck:
+    runs-on: ubuntu-latest
+    # Runs on every push/PR; does not block merge while moby/docker OSVs list no fixed module tag yet (see go.sum).
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+
+  verify:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        go-version: ["1.25.0", "stable"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go-version }}
+          cache: true
+      - name: Format check
+        run: test -z "$(gofmt -s -l .)"
+      - name: goimports
+        run: test -z "$(go run golang.org/x/tools/cmd/goimports@latest -l .)"
+      - name: Vet
+        run: go vet ./...
+      - name: Build all packages
+        run: go build ./...
+      - name: Tests with race, short mode, and coverage floor
+        run: |
+          go test -race -short -covermode=atomic -coverprofile=coverage.txt ./...
+          go tool cover -func=coverage.txt | go run ./scripts/coveragefloor 29
+      - name: Upload coverage profile
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-${{ matrix.go-version }}
+          path: coverage.txt
+          if-no-files-found: error

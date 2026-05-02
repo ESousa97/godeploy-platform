@@ -1,0 +1,18 @@
+# Run from repo root: docker compose -f deployments/docker-compose.yml up --build
+services:
+  godeployd:
+    build:
+      context: ..
+      dockerfile: deployments/Dockerfile
+    image: godeployd:local
+    ports:
+      - "8081:8081"
+    environment:
+      GODEPLOY_ADDR: ":8081"
+      GODEPLOY_DB: /data/godeploy.db
+    volumes:
+      - godeploy-data:/data
+      - /var/run/docker.sock:/var/run/docker.sock
+
+volumes:
+  godeploy-data:

@@ -1,25 +1,32 @@
 package observability
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
 	"github.com/docker/docker/client"
+
+	"godeploy-platform/internal/integrationtest"
 )
 
 func TestStatsHandler(t *testing.T) {
+	if testing.Short() {
+		t.Skip("docker integration skipped in -short")
+	}
 	docker, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
 	if err != nil {
 		t.Skip("Docker não disponível, pulando teste de integração")
 		return
 	}
 	defer docker.Close()
+	integrationtest.SkipIfDockerUnavailable(t, docker)
 
 	collector := NewCollector(docker)
-	handler := StatsHandler(collector)
+	handler := StatsHandler(collector, nil)
 
-	req := httptest.NewRequest("GET", "/api/stats", nil)
+	req := httptest.NewRequestWithContext(context.Background(), "GET", "/api/stats", nil)
 	rr := httptest.NewRecorder()
 
 	handler.ServeHTTP(rr, req)
@@ -72,18 +79,22 @@ func TestClampPercent(t *testing.T) {
 }
 
 func TestLogsStreamerHandler_Validation(t *testing.T) {
+	if testing.Short() {
+		t.Skip("docker integration skipped in -short")
+	}
 	docker, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
 	if err != nil {
 		t.Skip("Docker não disponível, pulando teste de integração")
 		return
 	}
 	defer docker.Close()
+	integrationtest.SkipIfDockerUnavailable(t, docker)
 
-	streamer := NewLogsStreamer(docker)
+	streamer := NewLogsStreamer(docker, nil)
 	handler := streamer.Handler()
 
 	// Teste sem parâmetro 'container'
-	req := httptest.NewRequest("GET", "/api/ws/logs", nil)
+	req := httptest.NewRequestWithContext(context.Background(), "GET", "/api/ws/logs", nil)
 	rr := httptest.NewRecorder()
 	handler.ServeHTTP(rr, req)
 
@@ -92,7 +103,7 @@ func TestLogsStreamerHandler_Validation(t *testing.T) {
 	}
 
 	// Teste com container inexistente
-	req = httptest.NewRequest("GET", "/api/ws/logs?container=non-existent-container-id", nil)
+	req = httptest.NewRequestWithContext(context.Background(), "GET", "/api/ws/logs?container=non-existent-container-id", nil)
 	rr = httptest.NewRecorder()
 	handler.ServeHTTP(rr, req)
 

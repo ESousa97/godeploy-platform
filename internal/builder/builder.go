@@ -16,17 +16,20 @@ import (
 	"strings"
 	"time"
 
-	"github.com/docker/docker/api/types"
+	"github.com/docker/docker/api/types/build"
 	"github.com/docker/docker/client"
 	"github.com/docker/docker/pkg/jsonmessage"
 
 	"godeploy-platform/internal/detector"
+	"godeploy-platform/internal/platform/iox"
 )
 
+// Builder wraps a Docker API client and performs image builds for godeploy.
 type Builder struct {
 	docker *client.Client
 }
 
+// Options configures a single [Builder.Build] invocation.
 type Options struct {
 	// RootDir é o diretório raiz do projeto para montar o contexto de build.
 	RootDir string
@@ -45,11 +48,13 @@ type Options struct {
 	Logs chan<- string
 }
 
+// Result reports the runtime strategy used for the Dockerfile and the final image tag.
 type Result struct {
 	Runtime detector.Runtime
 	Tag     string
 }
 
+// New returns a Builder that uses the given non-nil Docker API client.
 func New(docker *client.Client) (*Builder, error) {
 	if docker == nil {
 		return nil, errors.New("docker client nao pode ser nil")
@@ -57,6 +62,9 @@ func New(docker *client.Client) (*Builder, error) {
 	return &Builder{docker: docker}, nil
 }
 
+// Build creates a tar context from opts.RootDir, resolves or generates a Dockerfile,
+// and runs a Docker image build. The returned [Result].Tag includes a UTC timestamp
+// and a short commit suffix when git metadata is available.
 func (b *Builder) Build(ctx context.Context, opts Options) (Result, error) {
 	var out Result
 
@@ -129,7 +137,7 @@ func (b *Builder) Build(ctx context.Context, opts Options) (Result, error) {
 		return out, err
 	}
 
-	buildResp, err := b.docker.ImageBuild(ctx, ctxReader, types.ImageBuildOptions{
+	buildResp, err := b.docker.ImageBuild(ctx, ctxReader, build.ImageBuildOptions{
 		Tags:       []string{out.Tag},
 		Dockerfile: dfNameInContext,
 		Remove:     true,
@@ -137,10 +145,12 @@ func (b *Builder) Build(ctx context.Context, opts Options) (Result, error) {
 	if err != nil {
 		return out, fmt.Errorf("falha no ImageBuild: %w", err)
 	}
-	defer buildResp.Body.Close()
+	defer iox.Close(buildResp.Body)
 
 	if logs == nil {
-		_, _ = io.Copy(io.Discard, buildResp.Body)
+		if _, err := io.Copy(io.Discard, buildResp.Body); err != nil {
+			return out, fmt.Errorf("drain image build body: %w", err)
+		}
 		return out, nil
 	}
 
@@ -152,17 +162,22 @@ func (b *Builder) Build(ctx context.Context, opts Options) (Result, error) {
 }
 
 func (b *Builder) resolveDockerfile(rt detector.Runtime, rootDir, dockerfilePath string) (string, error) {
+	root, err := os.OpenRoot(rootDir)
+	if err != nil {
+		return "", fmt.Errorf("falha ao abrir rootDir: %w", err)
+	}
+	defer iox.Close(root)
+
 	if dockerfilePath != "" {
-		content, err := os.ReadFile(dockerfilePath)
+		content, err := readFileUnderRoot(rootDir, root, dockerfilePath)
 		if err != nil {
 			return "", fmt.Errorf("falha ao ler DockerfilePath: %w", err)
 		}
 		return ensureTrailingNewline(string(content)), nil
 	}
 
-	userDockerfile := filepath.Join(rootDir, "Dockerfile")
-	if fileExists(userDockerfile) {
-		content, err := os.ReadFile(userDockerfile)
+	if fileExists(filepath.Join(rootDir, "Dockerfile")) {
+		content, err := readFileUnderRoot(rootDir, root, "Dockerfile")
 		if err != nil {
 			return "", fmt.Errorf("falha ao ler Dockerfile do root: %w", err)
 		}
@@ -244,7 +259,9 @@ func createBuildContextTar(rootDir, dockerfileName, dockerfileContents string) (
 
 	// Injeta Dockerfile (template ou fornecido).
 	if err := writeTarFile(tw, dockerfileName, []byte(dockerfileContents), 0o644); err != nil {
-		_ = tw.Close()
+		if cerr := tw.Close(); cerr != nil {
+			return nil, fmt.Errorf("%w: %w", err, cerr)
+		}
 		return nil, err
 	}
 
@@ -256,7 +273,7 @@ func createBuildContextTar(rootDir, dockerfileName, dockerfileContents string) (
 	}
 
 	shouldSkip := func(rel string) bool {
-		rel = filepath.ToSlash(rel)
+		rel = filepath.ToSlash(strings.TrimPrefix(rel, "./"))
 		for _, ex := range excludes {
 			if rel == ex || strings.HasPrefix(rel, ex+"/") {
 				return true
@@ -269,7 +286,16 @@ func createBuildContextTar(rootDir, dockerfileName, dockerfileContents string) (
 		return false
 	}
 
-	err := filepath.WalkDir(rootDir, func(path string, d fs.DirEntry, walkErr error) error {
+	root, err := os.OpenRoot(rootDir)
+	if err != nil {
+		if cerr := tw.Close(); cerr != nil {
+			return nil, fmt.Errorf("%w: %w", err, cerr)
+		}
+		return nil, fmt.Errorf("falha ao abrir rootDir: %w", err)
+	}
+	defer iox.Close(root)
+
+	err = filepath.WalkDir(rootDir, func(path string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
 		}
@@ -286,6 +312,9 @@ func createBuildContextTar(rootDir, dockerfileName, dockerfileContents string) (
 			}
 			return nil
 		}
+		if d.IsDir() {
+			return nil
+		}
 
 		info, err := d.Info()
 		if err != nil {
@@ -295,19 +324,27 @@ func createBuildContextTar(rootDir, dockerfileName, dockerfileContents string) (
 			// Mantém simples/portável: ignora symlinks no contexto.
 			return nil
 		}
-		if d.IsDir() {
-			return nil
-		}
 
-		b, err := os.ReadFile(path)
+		// Evita leitura via path absoluto do callback (gosec G122/G304):
+		// sempre abre o arquivo relativo ao RootDir, de forma "root-scoped".
+		rel = filepath.ToSlash(filepath.Clean(rel))
+		rel = strings.TrimPrefix(rel, "./")
+		f, err := root.Open(rel)
 		if err != nil {
 			return err
 		}
-		rel = filepath.ToSlash(rel)
+		b, rerr := io.ReadAll(f)
+		iox.Close(f)
+		if rerr != nil {
+			return rerr
+		}
+
 		return writeTarFile(tw, rel, b, info.Mode())
 	})
 	if err != nil {
-		_ = tw.Close()
+		if cerr := tw.Close(); cerr != nil {
+			return nil, fmt.Errorf("%w: %w", err, cerr)
+		}
 		return nil, fmt.Errorf("falha ao montar contexto: %w", err)
 	}
 
@@ -316,6 +353,40 @@ func createBuildContextTar(rootDir, dockerfileName, dockerfileContents string) (
 	}
 
 	return bytes.NewReader(buf.Bytes()), nil
+}
+
+func readFileUnderRoot(rootDir string, root *os.Root, path string) ([]byte, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return nil, errors.New("path vazio")
+	}
+
+	// Accept both absolute and relative paths, but require the final resolved
+	// path to be under rootDir.
+	if filepath.IsAbs(path) {
+		rel, err := filepath.Rel(rootDir, path)
+		if err != nil {
+			return nil, err
+		}
+		rel = filepath.Clean(rel)
+		if rel == "." || rel == "" {
+			return nil, errors.New("path aponta para o root (esperado arquivo)")
+		}
+		if strings.HasPrefix(rel, ".."+string(filepath.Separator)) || rel == ".." {
+			return nil, fmt.Errorf("path fora do RootDir: %s", path)
+		}
+		path = rel
+	}
+
+	path = filepath.ToSlash(filepath.Clean(path))
+	path = strings.TrimPrefix(path, "./")
+
+	f, err := root.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer iox.Close(f)
+	return io.ReadAll(f)
 }
 
 func writeTarFile(tw *tar.Writer, name string, content []byte, mode fs.FileMode) error {
@@ -331,4 +402,3 @@ func writeTarFile(tw *tar.Writer, name string, content []byte, mode fs.FileMode)
 	_, err := io.Copy(tw, bytes.NewReader(content))
 	return err
 }
-

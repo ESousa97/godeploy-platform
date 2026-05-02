@@ -4,7 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -14,16 +14,16 @@ import (
 	"time"
 )
 
+// Config controls bind address, database access, reload polling, and logging for [New].
 type Config struct {
-	// Addr é o endereço de bind do proxy. Default ":80".
+	// Addr is the listen address for the reverse proxy (default ":80").
 	Addr string
-	// DB é a conexão SQLite.
+	// DB is the SQLite database connection shared with the route store.
 	DB *sql.DB
-	// PollInterval define o fallback de hot reload via polling no banco.
-	// Default: 1s.
+	// PollInterval is the polling interval when checking for route version changes (default 1s).
 	PollInterval time.Duration
-	// Logger opcional para erros internos. Default: log.Default().
-	Logger *log.Logger
+	// Logger receives internal warnings; if nil, slog.Default is used.
+	Logger *slog.Logger
 }
 
 // Proxy é um reverse proxy dinâmico roteado por Host.
@@ -40,8 +40,13 @@ type Proxy struct {
 
 	// notify força um reload imediato (ex.: após deploy).
 	notify chan struct{}
+
+	// upstream reutiliza um pool de ligações; um Transport por pedido esgotava sockets
+	// em testes com muitos ServeHTTP (ex. hot-reload em loop).
+	upstream *http.Transport
 }
 
+// New builds a [Proxy] backed by cfg.DB. Schema creation happens on [Proxy.Run].
 func New(cfg Config) (*Proxy, error) {
 	if cfg.DB == nil {
 		return nil, errors.New("DB nao pode ser nil")
@@ -53,7 +58,7 @@ func New(cfg Config) (*Proxy, error) {
 		cfg.PollInterval = 1 * time.Second
 	}
 	if cfg.Logger == nil {
-		cfg.Logger = log.Default()
+		cfg.Logger = slog.Default()
 	}
 
 	store, err := NewStore(cfg.DB)
@@ -65,6 +70,14 @@ func New(cfg Config) (*Proxy, error) {
 		cfg:    cfg,
 		store:  store,
 		notify: make(chan struct{}, 1),
+		upstream: &http.Transport{
+			DialContext:           (&net.Dialer{Timeout: 10 * time.Second}).DialContext,
+			TLSHandshakeTimeout:   10 * time.Second,
+			ResponseHeaderTimeout: 60 * time.Second,
+			IdleConnTimeout:       90 * time.Second,
+			MaxIdleConns:          100,
+			MaxIdleConnsPerHost:   10,
+		},
 	}
 	p.routes.Store(map[string]string{})
 	return p, nil
@@ -92,6 +105,10 @@ func (p *Proxy) Run(ctx context.Context) error {
 		Addr:              p.cfg.Addr,
 		Handler:           p,
 		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      0, // streaming responses / long downloads — leave unlimited
+		IdleTimeout:       120 * time.Second,
+		MaxHeaderBytes:    1 << 20,
 	}
 
 	errCh := make(chan error, 1)
@@ -108,15 +125,19 @@ func (p *Proxy) Run(ctx context.Context) error {
 
 	select {
 	case <-ctx.Done():
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
 		defer cancel()
-		_ = srv.Shutdown(shutdownCtx)
+		if err := srv.Shutdown(shutdownCtx); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			p.cfg.Logger.Warn("proxy shutdown", slog.Any("err", err))
+		}
+		p.upstream.CloseIdleConnections()
 		err := <-errCh
 		if errors.Is(err, http.ErrServerClosed) || err == nil {
 			return nil
 		}
 		return err
 	case err := <-errCh:
+		p.upstream.CloseIdleConnections()
 		if errors.Is(err, http.ErrServerClosed) {
 			return nil
 		}
@@ -134,11 +155,11 @@ func (p *Proxy) reloadLoop(ctx context.Context) {
 			return
 		case <-ticker.C:
 			if err := p.reloadIfChanged(ctx, false); err != nil {
-				p.cfg.Logger.Printf("proxy: hot reload falhou: %v", err)
+				p.cfg.Logger.Warn("proxy hot reload", slog.Any("err", err))
 			}
 		case <-p.notify:
 			if err := p.reloadIfChanged(ctx, false); err != nil {
-				p.cfg.Logger.Printf("proxy: hot reload (notify) falhou: %v", err)
+				p.cfg.Logger.Warn("proxy hot reload notify", slog.Any("err", err))
 			}
 		}
 	}
@@ -181,6 +202,7 @@ func appendXForwardedFor(h http.Header, ip string) {
 	h.Set(key, ip)
 }
 
+// ServeHTTP implements [http.Handler], routing by request Host to the configured upstream.
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	host := normalizeDomain(r.Host)
 	if host == "" {
@@ -188,15 +210,21 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	snap := p.routes.Load().(map[string]string)
-	target, ok := snap[host]
-	if !ok {
+	raw := p.routes.Load()
+	snap, snapOK := raw.(map[string]string)
+	if !snapOK || snap == nil {
+		http.Error(w, "rotas indisponiveis", http.StatusInternalServerError)
+		return
+	}
+	target, hasRoute := snap[host]
+	if !hasRoute {
 		http.Error(w, "rota nao encontrada", http.StatusNotFound)
 		return
 	}
 
 	targetURL := &url.URL{Scheme: "http", Host: strings.TrimSpace(target)}
 	proxy := &httputil.ReverseProxy{
+		Transport: p.upstream,
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			// Define upstream URL (host+scheme) e mantém path/query.
 			pr.SetURL(targetURL)
@@ -214,7 +242,11 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			appendXForwardedFor(out.Header, clientIP(r))
 		},
 		ErrorHandler: func(rw http.ResponseWriter, req *http.Request, err error) {
-			p.cfg.Logger.Printf("proxy: upstream erro host=%q target=%q: %v", host, target, err)
+			p.cfg.Logger.Warn("proxy upstream",
+				slog.String("host", host),
+				slog.String("target", target),
+				slog.Any("err", err),
+			)
 			http.Error(rw, "bad gateway", http.StatusBadGateway)
 		},
 		ModifyResponse: func(resp *http.Response) error {
@@ -227,4 +259,3 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	proxy.ServeHTTP(w, r)
 }
-

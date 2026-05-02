@@ -1,0 +1,10 @@
+# Optional (Etapa 4): https://pre-commit.com — install: pip install pre-commit && pre-commit install
+repos:
+  - repo: https://github.com/dnephin/pre-commit-golang
+    rev: v0.5.1
+    hooks:
+      - id: go-fmt
+      - id: go-vet
+      - id: go-imports
+      - id: golangci-lint
+      - id: go-mod-tidy

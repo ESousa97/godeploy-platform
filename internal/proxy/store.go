@@ -8,6 +8,8 @@ import (
 	"net"
 	"strings"
 	"time"
+
+	"godeploy-platform/internal/platform/iox"
 )
 
 // Store persiste rotas domain -> target (ip:port) em SQLite.
@@ -17,6 +19,7 @@ type Store struct {
 	db *sql.DB
 }
 
+// NewStore wraps db for route persistence. The caller must use a SQLite driver such as modernc.org/sqlite.
 func NewStore(db *sql.DB) (*Store, error) {
 	if db == nil {
 		return nil, errors.New("db nao pode ser nil")
@@ -24,6 +27,7 @@ func NewStore(db *sql.DB) (*Store, error) {
 	return &Store{db: db}, nil
 }
 
+// EnsureSchema creates proxy_routes and proxy_meta tables if they are missing.
 func (s *Store) EnsureSchema(ctx context.Context) error {
 	stmts := []string{
 		`CREATE TABLE IF NOT EXISTS proxy_routes (
@@ -56,10 +60,9 @@ func normalizeDomain(host string) string {
 	// Remove :port se existir.
 	if h, _, err := net.SplitHostPort(host); err == nil {
 		host = h
-	} else {
-		// net.SplitHostPort falha em "example.com" (sem porta), o que é ok.
-		// Também falha em alguns casos com IPv6 sem colchetes; mantemos simples.
 	}
+	// net.SplitHostPort falha em "example.com" (sem porta), o que é ok.
+	// Também falha em alguns casos com IPv6 sem colchetes; mantemos simples.
 	host = strings.TrimSuffix(host, ".")
 	return strings.ToLower(host)
 }
@@ -96,7 +99,9 @@ func (s *Store) UpsertRoute(ctx context.Context, domain, target string) error {
 	if err != nil {
 		return fmt.Errorf("falha ao iniciar transacao: %w", err)
 	}
-	defer func() { _ = tx.Rollback() }()
+	defer func() {
+		_ = tx.Rollback() //nolint:errcheck // noop after Commit; sql.ErrTxDone otherwise
+	}()
 
 	now := time.Now().UTC().Unix()
 	_, err = tx.ExecContext(ctx, `
@@ -120,6 +125,7 @@ func (s *Store) UpsertRoute(ctx context.Context, domain, target string) error {
 	return nil
 }
 
+// DeleteRoute removes a domain mapping and bumps the routes version counter.
 func (s *Store) DeleteRoute(ctx context.Context, domain string) error {
 	domain = normalizeDomain(domain)
 	if domain == "" {
@@ -130,7 +136,9 @@ func (s *Store) DeleteRoute(ctx context.Context, domain string) error {
 	if err != nil {
 		return fmt.Errorf("falha ao iniciar transacao: %w", err)
 	}
-	defer func() { _ = tx.Rollback() }()
+	defer func() {
+		_ = tx.Rollback() //nolint:errcheck // noop after Commit; sql.ErrTxDone otherwise
+	}()
 
 	if _, err := tx.ExecContext(ctx, `DELETE FROM proxy_routes WHERE domain = ?`, domain); err != nil {
 		return fmt.Errorf("falha ao deletar rota: %w", err)
@@ -144,6 +152,7 @@ func (s *Store) DeleteRoute(ctx context.Context, domain string) error {
 	return nil
 }
 
+// RoutesVersion returns the monotonic counter used for hot-reload change detection.
 func (s *Store) RoutesVersion(ctx context.Context) (int64, error) {
 	var v int64
 	if err := s.db.QueryRowContext(ctx, `SELECT value FROM proxy_meta WHERE key = 'routes_version'`).Scan(&v); err != nil {
@@ -152,35 +161,36 @@ func (s *Store) RoutesVersion(ctx context.Context) (int64, error) {
 	return v, nil
 }
 
-func (s *Store) LoadAll(ctx context.Context) (map[string]string, int64, error) {
-	v, err := s.RoutesVersion(ctx)
+// LoadAll returns every route plus the current routes version.
+func (s *Store) LoadAll(ctx context.Context) (routes map[string]string, version int64, err error) {
+	version, err = s.RoutesVersion(ctx)
 	if err != nil {
 		return nil, 0, err
 	}
 
-	rows, err := s.db.QueryContext(ctx, `SELECT domain, target FROM proxy_routes`)
-	if err != nil {
-		return nil, 0, fmt.Errorf("falha ao listar rotas: %w", err)
+	rows, qerr := s.db.QueryContext(ctx, `SELECT domain, target FROM proxy_routes`) //nolint:sqlclosecheck // rows closed in defer below
+	if qerr != nil {
+		return nil, 0, fmt.Errorf("falha ao listar rotas: %w", qerr)
 	}
-	defer rows.Close()
+	defer iox.Close(rows)
 
-	out := make(map[string]string)
+	routes = make(map[string]string)
 	for rows.Next() {
 		var domain, target string
-		if err := rows.Scan(&domain, &target); err != nil {
-			return nil, 0, fmt.Errorf("falha ao scan de rota: %w", err)
+		if scanErr := rows.Scan(&domain, &target); scanErr != nil {
+			return nil, 0, fmt.Errorf("falha ao scan de rota: %w", scanErr)
 		}
 		domain = normalizeDomain(domain)
 		if domain == "" {
 			continue
 		}
-		out[domain] = strings.TrimSpace(target)
+		routes[domain] = strings.TrimSpace(target)
 	}
-	if err := rows.Err(); err != nil {
+	if err = rows.Err(); err != nil {
 		return nil, 0, fmt.Errorf("falha ao iterar rotas: %w", err)
 	}
 
-	return out, v, nil
+	return routes, version, nil
 }
 
 // GetRoute retorna o target atual para um domain. Se não existir, ok=false.
@@ -200,4 +210,3 @@ func (s *Store) GetRoute(ctx context.Context, domain string) (target string, ok 
 	}
 	return strings.TrimSpace(t), true, nil
 }
-

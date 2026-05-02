@@ -12,27 +12,34 @@ import (
 type Runtime string
 
 const (
-	RuntimeGo         Runtime = "go"
-	RuntimeNodeJS     Runtime = "nodejs"
-	RuntimePython     Runtime = "python"
-	RuntimeStatic     Runtime = "static"
+	// RuntimeGo marks a Go module project (go.mod) for templated builds.
+	RuntimeGo Runtime = "go"
+	// RuntimeNodeJS marks a Node.js project (package.json).
+	RuntimeNodeJS Runtime = "nodejs"
+	// RuntimePython marks a Python project (pyproject.toml, requirements.txt, or Pipfile).
+	RuntimePython Runtime = "python"
+	// RuntimeStatic marks a static site (index.html at root or under public/).
+	RuntimeStatic Runtime = "static"
+	// RuntimeDockerfile means the repository supplies its own Dockerfile.
 	RuntimeDockerfile Runtime = "dockerfile"
 )
 
+// Result holds the detected [Runtime] and file paths that justified the choice.
 type Result struct {
+	// Runtime is the deployment strategy selected for the project root.
 	Runtime Runtime
-	// Evidence indica o(s) arquivo(s) que motivaram a decisao.
+	// Evidence lists marker files that motivated the decision.
 	Evidence []string
 }
 
 // Detect varre o diretório raiz e retorna o runtime baseado na presença de arquivos comuns.
 //
 // Ordem de precedência:
-// - Dockerfile
-// - Go (go.mod)
-// - Node.js (package.json)
-// - Python (pyproject.toml / requirements.txt / Pipfile)
-// - Static (index.html)
+// - Dockerfile.
+// - Go (go.mod).
+// - Node.js (package.json).
+// - Python (pyproject.toml / requirements.txt / Pipfile).
+// - Static (index.html).
 func Detect(rootDir string) (Result, error) {
 	rootDir = strings.TrimSpace(rootDir)
 	if rootDir == "" {
@@ -93,4 +100,3 @@ func exists(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil
 }
-
