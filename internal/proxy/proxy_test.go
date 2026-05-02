@@ -73,7 +73,7 @@ func TestProxyRoutesByHostAndHotReload(t *testing.T) {
 		t.Fatalf("expected A 200, got %d body=%q", rr.Code, rr.Body.String())
 	}
 
-	// Update route to B; reload snapshot (evita depender só do notify + loop async).
+	// Update route to B; reload snapshot (avoids relying only on notify + async loop).
 	if err := p.store.UpsertRoute(ctx, "app.local", targetB); err != nil {
 		t.Fatalf("upsert B: %v", err)
 	}

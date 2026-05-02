@@ -1,20 +1,20 @@
-# Deploy em produção (notas)
+# Production deployment (notes)
 
 ## Daemon (`godeployd`)
 
-- O processo escuta em `GODEPLOY_ADDR` (por defeito `:8081`) **sem TLS**. Coloque um reverse proxy (Caddy, nginx, traefik ou load balancer cloud) na frente para HTTPS e HSTS.
-- O ficheiro `deployments/docker-compose.yml` exemplifica socket Docker montado e volume para `GODEPLOY_DB`. Ajuste portas, rede e **nunca** exponha `GODEPLOY_WEBHOOK_SECRET` em logs ou imagens públicas.
-- Defina `GODEPLOY_WEBHOOK_SECRET` em produção e mantenha rate limits (`GODEPLOY_WEBHOOK_RPS` / `GODEPLOY_WEBHOOK_BURST`) adequados ao tráfego esperado.
+- The process listens on `GODEPLOY_ADDR` (default `:8081`) **without TLS**. Put a reverse proxy (Caddy, nginx, Traefik, or a cloud load balancer) in front for HTTPS and HSTS.
+- `deployments/docker-compose.yml` shows a mounted Docker socket and volume for `GODEPLOY_DB`. Tune ports, networks, and **never** expose `GODEPLOY_WEBHOOK_SECRET` in logs or public images.
+- Set `GODEPLOY_WEBHOOK_SECRET` in production and keep webhook rate limits (`GODEPLOY_WEBHOOK_RPS` / `GODEPLOY_WEBHOOK_BURST`) appropriate for expected traffic.
 
-## Reverse proxy de apps (`internal/proxy`)
+## App reverse proxy (`internal/proxy`)
 
-- Binário separado (integração no teu arranque): escuta tipicamente em `:80` ou `:8080` e lê rotas do **mesmo** SQLite que o daemon atualiza após deploy.
-- Após cada `UpsertRoute`, chame `NotifyReload` no `*proxy.Proxy` se quiseres propagar a rota sem esperar o poll (a pipeline do repositório segue este padrão quando ligada ao proxy).
+- Separate binary (integrate in your startup): typically listens on `:80` or `:8080` and reads routes from the **same** SQLite the daemon updates after deploy.
+- After each `UpsertRoute`, call `NotifyReload` on `*proxy.Proxy` if you want the route propagated without waiting for the poll (this repository’s pipeline follows that pattern when wired to the proxy).
 
-## Checklist rápido
+## Quick checklist
 
-1. Docker Engine atualizado no host (mitigação operacional para avisos `govulncheck` no cliente Go).
-2. Backup periódico de `GODEPLOY_DB`.
-3. Firewall: apenas proxies e redes de confiança devem alcançar `godeployd` e o socket Docker.
+1. Up-to-date Docker Engine on the host (operational mitigation for `govulncheck` warnings on the Go client).
+2. Periodic backup of `GODEPLOY_DB`.
+3. Firewall: only trusted proxies and networks should reach `godeployd` and the Docker socket.
 
-Para variáveis e fluxo local, ver [setup.md](setup.md) e [architecture.md](architecture.md).
+For variables and local flow, see [setup.md](setup.md) and [architecture.md](architecture.md).

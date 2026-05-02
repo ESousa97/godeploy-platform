@@ -9,18 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Etapa 4 (qualidade): testes em `internal/pipeline`, `internal/platform/iox`, `internal/platform/sqlpool`; exemplo `ExampleParser_Parse_githubPing` em `internal/webhook`; piso de cobertura `test-cover-check` estável (≥29% com `go test -short`).
+- Stage 4 (quality): tests in `internal/pipeline`, `internal/platform/iox`, `internal/platform/sqlpool`; `ExampleParser_Parse_githubPing` in `internal/webhook`; stable `test-cover-check` coverage floor (≥29% with `go test -short`).
 
 ### Changed
 
-- Documentação nível A+: README (tabela Makefile alinhada a `fmt`/goimports, `validate-full`, `test-cover-check`, secção índice `docs/`), CONTRIBUTING (Conventional Commits), SECURITY (header `Cache-Control`), novos `docs/deployment.md` e expansão de `docs/architecture.md` / `docs/api.md` / `docs/setup.md`.
-- `internal/proxy`: reutilização de um `http.Transport` por instância do proxy; `Makefile` `test-cover-check` usa ordem de flags mais segura para shells.
-- `.golangci.yml`: conjunto de linters alinhado ao plano (com exclusões/ajustes documentados em `PROGRESSO_etapas.md`).
+- A+ documentation: README (Makefile table aligned with `fmt`/goimports, `validate-full`, `test-cover-check`, `docs/` index), CONTRIBUTING (Conventional Commits), SECURITY (`Cache-Control` header), new `docs/deployment.md` and expanded `docs/architecture.md` / `docs/api.md` / `docs/setup.md`.
+- `internal/proxy`: reuse one `http.Transport` per proxy instance; `Makefile` `test-cover-check` uses a safer flag order for shells.
+- `.golangci.yml`: linter set aligned with the plan (with exclusions documented in `PLAN_PROGRESS.md`).
+- Project copy and operator-facing strings internationalised to English (`README`, `docs/`, errors, logs).
 
 ### Fixed
 
-- Godoc: tipo `ResourceConflictError` e método `Error` no pacote `scheduler`; comentário de pacote `integrationtest` clarificado.
-- Teste de hot-reload do proxy e fugas de ligações em `ServeHTTP`; `godeployd` com saída por código de retorno para respeitar defers; testes de observability com Docker respeitam `-short`.
+- Godoc: `ResourceConflictError` type and `Error` method in `scheduler`; clarified `integrationtest` package comment.
+- Proxy hot-reload test and connection leaks in `ServeHTTP`; `godeployd` exits via return code to honour defers; Docker-backed observability tests respect `-short`.
 
 ## [0.1.0] - 2026-05-01
 

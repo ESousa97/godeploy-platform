@@ -59,7 +59,7 @@ func (s *LogsStreamer) Handler() http.HandlerFunc {
 func (s *LogsStreamer) serveLogsWS(w http.ResponseWriter, r *http.Request, upgrader websocket.Upgrader) {
 	containerRef := strings.TrimSpace(r.URL.Query().Get("container"))
 	if containerRef == "" {
-		http.Error(w, "parametro 'container' obrigatorio", http.StatusBadRequest)
+		http.Error(w, "required query parameter: container", http.StatusBadRequest)
 		return
 	}
 
@@ -67,7 +67,7 @@ func (s *LogsStreamer) serveLogsWS(w http.ResponseWriter, r *http.Request, upgra
 	inspect, err := s.docker.ContainerInspect(ctx, containerRef)
 	cancel()
 	if err != nil {
-		http.Error(w, "container nao encontrado", http.StatusNotFound)
+		http.Error(w, "container not found", http.StatusNotFound)
 		return
 	}
 
@@ -97,7 +97,7 @@ func (s *LogsStreamer) serveLogsWS(w http.ResponseWriter, r *http.Request, upgra
 		Tail:       "100",
 	})
 	if err != nil {
-		_ = send(LogMessage{Stream: streamMeta, Line: "erro ao abrir logs"}) //nolint:errcheck // client already misconfigured
+		_ = send(LogMessage{Stream: streamMeta, Line: "failed to open logs"}) //nolint:errcheck // client already misconfigured
 		return
 	}
 	defer iox.Close(rc)

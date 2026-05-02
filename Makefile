@@ -7,7 +7,7 @@ DAEMON := $(BIN_DIR)/godeployd
 TUI := $(BIN_DIR)/godeploy-tui
 LOGTAIL := $(BIN_DIR)/godeploy-logtail
 COVERAGE_FILE := coverage.txt
-# Minimum total statement coverage for `make test-cover-check` (see plan_go.md ETAPA 4).
+# Minimum total statement coverage for `make test-cover-check` (see PLAN_PROGRESS.md, stage 4).
 COVER_MIN ?= 29
 DOCKER_IMAGE ?= godeployd:local
 

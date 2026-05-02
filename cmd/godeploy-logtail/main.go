@@ -14,7 +14,7 @@ import (
 
 func main() {
 	if len(os.Args) < 2 {
-		log.Fatal("Uso: godeploy-logtail <ID_DO_CONTAINER>")
+		log.Fatal("usage: godeploy-logtail <CONTAINER_ID>")
 	}
 	containerID := os.Args[1]
 
@@ -24,25 +24,25 @@ func main() {
 	}
 	u, err := url.Parse(base)
 	if err != nil {
-		log.Fatalf("GODEPLOY_LOG_WS_URL invalida: %v", err)
+		log.Fatalf("invalid GODEPLOY_LOG_WS_URL: %v", err)
 	}
 	q := u.Query()
 	q.Set("container", containerID)
 	u.RawQuery = q.Encode()
 
-	fmt.Printf("Conectando em %s...\n", u.String())
+	fmt.Printf("Connecting to %s...\n", u.String())
 
 	c, _, err := websocket.DefaultDialer.Dial(u.String(), nil)
 	if err != nil {
-		log.Fatal("Erro ao conectar:", err)
+		log.Fatal("connection error:", err)
 	}
 	defer iox.Close(c)
 
-	fmt.Println("Conectado! Aguardando logs (pressione Ctrl+C para sair)...")
+	fmt.Println("Connected. Streaming logs (Ctrl+C to exit)...")
 	for {
 		_, message, err := c.ReadMessage()
 		if err != nil {
-			log.Println("Conexão fechada:", err)
+			log.Println("connection closed:", err)
 			return
 		}
 		fmt.Printf("%s\n", message)

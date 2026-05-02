@@ -1,33 +1,36 @@
-# Setup avançado
+# Advanced setup
 
-## Variáveis de ambiente
+## Environment variables
 
-Copie `.env.example` para `.env` e exporte as variáveis no shell antes de `make run` ou `docker compose`, porque o runtime Go não lê `.env` nativamente.
+Copy `.env.example` to `.env` and export variables in your shell before `make run` or `docker compose`, because the Go runtime does not read `.env` natively.
 
-## Docker Compose
+See `.env.example` for the full list of `GODEPLOY_*` knobs.
 
-O ficheiro `deployments/docker-compose.yml` monta o socket Docker e um volume para `GODEPLOY_DB`. Ajuste portas e secrets antes de expor à Internet.
+`deployments/docker-compose.yml` mounts the Docker socket and a volume for `GODEPLOY_DB`. Adjust ports and secrets before exposing anything to the Internet.
 
-## CI local
-
-Gate principal (espelha a maior parte do workflow GitHub Actions):
+## Local validation
 
 ```bash
-make validate
+make validate        # fmt, vet, lint, tests, build
+make validate-full   # adds -short tests + coverage floor + build
 ```
 
-Gate com piso de cobertura nos testes `-short` (como `validate-full` no Makefile):
+Coverage gate on `-short` tests (same idea as `validate-full` in the Makefile):
 
 ```bash
-make validate-full
+make test-cover-check
+# or with a custom floor:
+make test-cover-check COVER_MIN=30
 ```
 
-Inclui `golangci-lint`; instale a versão compatível com `.golangci.yml` (formato versão `2`). O workflow de CI usa também `goimports` explícito no job de formato.
+## Linting
 
-## Windows e testes
+Includes `golangci-lint`; install a version compatible with `.golangci.yml` (version format `2`). The CI workflow also runs explicit `goimports` in the format job.
 
-O pacote `internal/detector` omite ficheiros de teste em Windows por defeito para evitar bloqueio de `*.test.exe` por antivírus. Para correr testes desse pacote no Windows, use WSL ou aplique a *build tag* `force_detector_tests` com exclusões no Defender (ver README).
+## Windows / antivirus
 
-## Proxy em produção
+The `internal/detector` package skips test binaries on Windows by default to avoid `*.test.exe` locks from antivirus. To run that package’s tests on Windows, use WSL or apply the `force_detector_tests` build tag with Defender exclusions (see README).
 
-O reverse proxy em `internal/proxy` escuta tipicamente em `:80` atrás de um terminador TLS. O daemon `godeployd` não configura TLS nativamente; coloque-o atrás de nginx, Caddy ou cloud load balancer.
+## Production proxy
+
+The reverse proxy in `internal/proxy` typically listens on `:80` behind a TLS terminator. The `godeployd` daemon does not configure TLS natively; place it behind nginx, Caddy, or a cloud load balancer.

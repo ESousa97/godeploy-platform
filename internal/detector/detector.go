@@ -16,7 +16,7 @@ const (
 	markerDockerfile  = "Dockerfile"
 )
 
-// Runtime representa a linguagem/estrategia de build detectada.
+// Runtime is the detected language or build strategy.
 type Runtime string
 
 const (
@@ -40,9 +40,9 @@ type Result struct {
 	Evidence []string
 }
 
-// Detect varre o diretório raiz e retorna o runtime baseado na presença de arquivos comuns.
+// Detect walks the repository root and returns the runtime based on common marker files.
 //
-// Ordem de precedência:
+// Precedence order:
 // - Dockerfile.
 // - Go (go.mod).
 // - Node.js (package.json).
@@ -51,23 +51,23 @@ type Result struct {
 func Detect(rootDir string) (Result, error) {
 	rootDir = strings.TrimSpace(rootDir)
 	if rootDir == "" {
-		return Result{}, errors.New("rootDir nao pode ser vazio")
+		return Result{}, errors.New("rootDir cannot be empty")
 	}
 
 	info, err := os.Stat(rootDir)
 	if err != nil {
-		return Result{}, fmt.Errorf("falha ao acessar rootDir: %w", err)
+		return Result{}, fmt.Errorf("failed to access rootDir: %w", err)
 	}
 	if !info.IsDir() {
-		return Result{}, fmt.Errorf("rootDir nao e um diretorio: %s", rootDir)
+		return Result{}, fmt.Errorf("rootDir is not a directory: %s", rootDir)
 	}
 
 	rootDir, err = filepath.Abs(rootDir)
 	if err != nil {
-		return Result{}, fmt.Errorf("falha ao resolver path absoluto: %w", err)
+		return Result{}, fmt.Errorf("failed to resolve absolute path: %w", err)
 	}
 
-	// Dockerfile (se existe no root, respeita o do usuário).
+	// Dockerfile at the repository root wins when present.
 	if exists(filepath.Join(rootDir, markerDockerfile)) {
 		return Result{Runtime: RuntimeDockerfile, Evidence: []string{markerDockerfile}}, nil
 	}
@@ -101,7 +101,7 @@ func Detect(rootDir string) (Result, error) {
 		return Result{Runtime: RuntimeStatic, Evidence: []string{filepath.ToSlash(filepath.Join("public", markerIndexHTML))}}, nil
 	}
 
-	return Result{}, errors.New("runtime nao detectado: nenhum marcador conhecido encontrado no diretorio raiz")
+	return Result{}, errors.New("runtime not detected: no known markers found in repository root")
 }
 
 func exists(path string) bool {

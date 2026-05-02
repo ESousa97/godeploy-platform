@@ -17,7 +17,7 @@ func TestStatsHandler(t *testing.T) {
 	}
 	docker, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
 	if err != nil {
-		t.Skip("Docker não disponível, pulando teste de integração")
+		t.Skip("Docker unavailable, skipping integration test")
 		return
 	}
 	defer docker.Close()
@@ -84,7 +84,7 @@ func TestLogsStreamerHandler_Validation(t *testing.T) {
 	}
 	docker, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
 	if err != nil {
-		t.Skip("Docker não disponível, pulando teste de integração")
+		t.Skip("Docker unavailable, skipping integration test")
 		return
 	}
 	defer docker.Close()
@@ -93,7 +93,7 @@ func TestLogsStreamerHandler_Validation(t *testing.T) {
 	streamer := NewLogsStreamer(docker, nil)
 	handler := streamer.Handler()
 
-	// Teste sem parâmetro 'container'
+	// Request without 'container' query parameter
 	req := httptest.NewRequestWithContext(context.Background(), "GET", "/api/ws/logs", nil)
 	rr := httptest.NewRecorder()
 	handler.ServeHTTP(rr, req)
@@ -102,7 +102,7 @@ func TestLogsStreamerHandler_Validation(t *testing.T) {
 		t.Errorf("handler returned wrong status code for missing param: got %v want %v", status, http.StatusBadRequest)
 	}
 
-	// Teste com container inexistente
+	// Non-existent container id
 	req = httptest.NewRequestWithContext(context.Background(), "GET", "/api/ws/logs?container=non-existent-container-id", nil)
 	rr = httptest.NewRecorder()
 	handler.ServeHTTP(rr, req)

@@ -46,7 +46,7 @@ func (p Parser) Parse(r *http.Request) (Event, error) {
 
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
-		return Event{}, fmt.Errorf("falha ao ler body: %w", err)
+		return Event{}, fmt.Errorf("failed to read body: %w", err)
 	}
 
 	if ghEvent != "" {
@@ -60,28 +60,28 @@ func (p Parser) Parse(r *http.Request) (Event, error) {
 	if glEvent != "" {
 		if p.Secret != "" {
 			if token := strings.TrimSpace(r.Header.Get("X-Gitlab-Token")); token == "" || token != p.Secret {
-				return Event{}, errors.New("gitlab token invalido")
+				return Event{}, errors.New("invalid gitlab token")
 			}
 		}
 		return parseGitLab(glEvent, body)
 	}
 
-	return Event{}, errors.New("headers de webhook nao reconhecidos (esperado GitHub ou GitLab)")
+	return Event{}, errors.New("unrecognized webhook headers (expected GitHub or GitLab)")
 }
 
 func verifyGitHubSignature256(secret []byte, sigHeader string, body []byte) error {
 	sigHeader = strings.TrimSpace(sigHeader)
 	if sigHeader == "" {
-		return errors.New("assinatura GitHub ausente (X-Hub-Signature-256)")
+		return errors.New("missing GitHub signature (X-Hub-Signature-256)")
 	}
 	const prefix = "sha256="
 	if !strings.HasPrefix(sigHeader, prefix) {
-		return errors.New("assinatura GitHub invalida (esperado sha256=...)")
+		return errors.New("invalid GitHub signature (expected sha256=...)")
 	}
 	wantHex := strings.TrimPrefix(sigHeader, prefix)
 	want, err := hex.DecodeString(wantHex)
 	if err != nil {
-		return errors.New("assinatura GitHub invalida (hex)")
+		return errors.New("invalid GitHub signature (hex)")
 	}
 	mac := hmac.New(sha256.New, secret)
 	if _, err := mac.Write(body); err != nil {
@@ -89,7 +89,7 @@ func verifyGitHubSignature256(secret []byte, sigHeader string, body []byte) erro
 	}
 	got := mac.Sum(nil)
 	if !hmac.Equal(got, want) {
-		return errors.New("assinatura GitHub invalida")
+		return errors.New("invalid GitHub signature")
 	}
 	return nil
 }
@@ -99,7 +99,7 @@ func parseGitHub(eventType string, body []byte) (Event, error) {
 		return Event{Provider: ProviderGitHub, Type: "ping"}, nil
 	}
 	if !strings.EqualFold(eventType, "push") {
-		return Event{}, fmt.Errorf("evento GitHub nao suportado: %s", eventType)
+		return Event{}, fmt.Errorf("unsupported GitHub event: %s", eventType)
 	}
 
 	var payload struct {
@@ -112,16 +112,16 @@ func parseGitHub(eventType string, body []byte) (Event, error) {
 		} `json:"repository"`
 	}
 	if err := json.Unmarshal(body, &payload); err != nil {
-		return Event{}, fmt.Errorf("json invalido: %w", err)
+		return Event{}, fmt.Errorf("invalid json: %w", err)
 	}
 
 	app := strings.TrimSpace(payload.Repository.Name)
 	if app == "" {
-		return Event{}, errors.New("payload sem repository.name")
+		return Event{}, errors.New("payload missing repository.name")
 	}
 	clone := strings.TrimSpace(payload.Repository.CloneURL)
 	if clone == "" {
-		return Event{}, errors.New("payload sem repository.clone_url")
+		return Event{}, errors.New("payload missing repository.clone_url")
 	}
 	ref := strings.TrimSpace(payload.Ref)
 	ref = strings.TrimPrefix(ref, "refs/heads/")
@@ -137,7 +137,7 @@ func parseGitHub(eventType string, body []byte) (Event, error) {
 
 func parseGitLab(eventType string, body []byte) (Event, error) {
 	if !strings.EqualFold(eventType, "Push Hook") && !strings.EqualFold(eventType, "push hook") {
-		return Event{}, fmt.Errorf("evento GitLab nao suportado: %s", eventType)
+		return Event{}, fmt.Errorf("unsupported GitLab event: %s", eventType)
 	}
 
 	var payload struct {
@@ -151,26 +151,26 @@ func parseGitLab(eventType string, body []byte) (Event, error) {
 		} `json:"project"`
 	}
 	if err := json.Unmarshal(body, &payload); err != nil {
-		return Event{}, fmt.Errorf("json invalido: %w", err)
+		return Event{}, fmt.Errorf("invalid json: %w", err)
 	}
 
 	app := strings.TrimSpace(payload.Project.Name)
 	if app == "" {
-		// fallback: usa a parte final de path_with_namespace
+		// fallback: use the last segment of path_with_namespace
 		if p := strings.TrimSpace(payload.Project.Path); p != "" {
 			parts := strings.Split(p, "/")
 			app = strings.TrimSpace(parts[len(parts)-1])
 		}
 	}
 	if app == "" {
-		return Event{}, errors.New("payload sem project.name")
+		return Event{}, errors.New("payload missing project.name")
 	}
 	clone := strings.TrimSpace(payload.Project.GitHTTP)
 	if clone == "" {
 		clone = strings.TrimSpace(payload.Project.HTTPURL)
 	}
 	if clone == "" {
-		return Event{}, errors.New("payload sem project.(git_http_url|http_url)")
+		return Event{}, errors.New("payload missing project.(git_http_url|http_url)")
 	}
 	ref := strings.TrimSpace(payload.Ref)
 	ref = strings.TrimPrefix(ref, "refs/heads/")

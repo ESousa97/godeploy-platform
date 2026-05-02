@@ -31,20 +31,20 @@ type Builder struct {
 
 // Options configures a single [Builder.Build] invocation.
 type Options struct {
-	// RootDir é o diretório raiz do projeto para montar o contexto de build.
+	// RootDir is the project root directory used to assemble the build context.
 	RootDir string
-	// ImageName é o nome do repositório da imagem (sem tag), ex.: "godeploy/myapp".
+	// ImageName is the image repository name without tag, e.g. "godeploy/myapp".
 	ImageName string
 
-	// DockerfilePath opcional: se fornecido, usa este arquivo como Dockerfile.
-	// Caso vazio, usa um template embutido baseado no runtime detectado.
+	// DockerfilePath optional: when set, this file is used as the Dockerfile.
+	// When empty, an embedded template is chosen from the detected runtime.
 	DockerfilePath string
 
-	// Commit opcional: se vazio, tenta obter via git.
+	// Commit optional: when empty, git metadata is attempted.
 	Commit string
 
-	// Logs é um canal para streaming de logs do build.
-	// Se não for nil, o Builder enviará linhas de log e fechará o canal ao final.
+	// Logs is a channel for streaming build log lines.
+	// When non-nil, the Builder sends log lines and closes the channel when done.
 	Logs chan<- string
 }
 
@@ -57,7 +57,7 @@ type Result struct {
 // New returns a Builder that uses the given non-nil Docker API client.
 func New(docker *client.Client) (*Builder, error) {
 	if docker == nil {
-		return nil, errors.New("docker client nao pode ser nil")
+		return nil, errors.New("docker client cannot be nil")
 	}
 	return &Builder{docker: docker}, nil
 }
@@ -112,21 +112,21 @@ func normalizeBuildOptions(opts *Options) {
 
 func validateAndAbsolutizeRoot(opts *Options) error {
 	if opts.RootDir == "" {
-		return errors.New("RootDir nao pode ser vazio")
+		return errors.New("RootDir cannot be empty")
 	}
 	if opts.ImageName == "" {
-		return errors.New("ImageName nao pode ser vazio")
+		return errors.New("ImageName cannot be empty")
 	}
 	rootInfo, err := os.Stat(opts.RootDir)
 	if err != nil {
-		return fmt.Errorf("falha ao acessar RootDir: %w", err)
+		return fmt.Errorf("failed to access RootDir: %w", err)
 	}
 	if !rootInfo.IsDir() {
-		return fmt.Errorf("RootDir nao e diretorio: %s", opts.RootDir)
+		return fmt.Errorf("RootDir is not a directory: %s", opts.RootDir)
 	}
 	rootAbs, err := filepath.Abs(opts.RootDir)
 	if err != nil {
-		return fmt.Errorf("falha ao resolver RootDir absoluto: %w", err)
+		return fmt.Errorf("failed to resolve absolute RootDir: %w", err)
 	}
 	opts.RootDir = rootAbs
 	return nil
@@ -162,7 +162,7 @@ func (b *Builder) runDockerImageBuild(ctx context.Context, out Result, dfName st
 		Remove:     true,
 	})
 	if err != nil {
-		return out, fmt.Errorf("falha no ImageBuild: %w", err)
+		return out, fmt.Errorf("ImageBuild failed: %w", err)
 	}
 	defer iox.Close(buildResp.Body)
 
@@ -181,14 +181,14 @@ func (b *Builder) runDockerImageBuild(ctx context.Context, out Result, dfName st
 func (b *Builder) resolveDockerfile(rt detector.Runtime, rootDir, dockerfilePath string) (string, error) {
 	root, err := os.OpenRoot(rootDir)
 	if err != nil {
-		return "", fmt.Errorf("falha ao abrir rootDir: %w", err)
+		return "", fmt.Errorf("failed to open rootDir: %w", err)
 	}
 	defer iox.Close(root)
 
 	if dockerfilePath != "" {
 		content, err := readFileUnderRoot(rootDir, root, dockerfilePath)
 		if err != nil {
-			return "", fmt.Errorf("falha ao ler DockerfilePath: %w", err)
+			return "", fmt.Errorf("failed to read DockerfilePath: %w", err)
 		}
 		return ensureTrailingNewline(string(content)), nil
 	}
@@ -196,7 +196,7 @@ func (b *Builder) resolveDockerfile(rt detector.Runtime, rootDir, dockerfilePath
 	if fileExists(filepath.Join(rootDir, "Dockerfile")) {
 		content, err := readFileUnderRoot(rootDir, root, "Dockerfile")
 		if err != nil {
-			return "", fmt.Errorf("falha ao ler Dockerfile do root: %w", err)
+			return "", fmt.Errorf("failed to read root Dockerfile: %w", err)
 		}
 		return ensureTrailingNewline(string(content)), nil
 	}
@@ -238,7 +238,7 @@ func streamDockerBuildLogs(r io.Reader, logs chan<- string) error {
 			if errors.Is(err, io.EOF) {
 				return nil
 			}
-			return fmt.Errorf("falha ao decodificar log do build: %w", err)
+			return fmt.Errorf("failed to decode build log: %w", err)
 		}
 
 		if msg.Error != nil {
@@ -247,7 +247,7 @@ func streamDockerBuildLogs(r io.Reader, logs chan<- string) error {
 				text = msg.Error.Error()
 			}
 			logs <- strings.TrimRight(text, "\n")
-			return fmt.Errorf("build falhou: %s", strings.TrimSpace(text))
+			return fmt.Errorf("build failed: %s", strings.TrimSpace(text))
 		}
 
 		if s := strings.TrimSpace(msg.Stream); s != "" {
@@ -274,19 +274,19 @@ func createBuildContextTar(rootDir, dockerfileName, dockerfileContents string) (
 	buf := new(bytes.Buffer)
 	tw := tar.NewWriter(buf)
 
-	// Injeta Dockerfile (template ou fornecido).
+	// Inject Dockerfile (template or user-supplied).
 	if err := writeTarFile(tw, dockerfileName, []byte(dockerfileContents), 0o644); err != nil {
 		return nil, closeTarWriterCombiningErr(tw, err)
 	}
 
 	root, err := os.OpenRoot(rootDir)
 	if err != nil {
-		return nil, closeTarWriterCombiningErr(tw, fmt.Errorf("falha ao abrir rootDir: %w", err))
+		return nil, closeTarWriterCombiningErr(tw, fmt.Errorf("failed to open rootDir: %w", err))
 	}
 	defer iox.Close(root)
 
 	if err := walkDirIntoTar(tw, root, rootDir, dockerfileName); err != nil {
-		return nil, closeTarWriterCombiningErr(tw, fmt.Errorf("falha ao montar contexto: %w", err))
+		return nil, closeTarWriterCombiningErr(tw, fmt.Errorf("failed to assemble build context: %w", err))
 	}
 
 	if err := tw.Close(); err != nil {
@@ -367,7 +367,7 @@ func tarWalkEntry(tw *tar.Writer, root *os.Root, rootDir, path string, d fs.DirE
 func readFileUnderRoot(rootDir string, root *os.Root, path string) ([]byte, error) {
 	path = strings.TrimSpace(path)
 	if path == "" {
-		return nil, errors.New("path vazio")
+		return nil, errors.New("path is empty")
 	}
 
 	// Accept both absolute and relative paths, but require the final resolved
@@ -379,10 +379,10 @@ func readFileUnderRoot(rootDir string, root *os.Root, path string) ([]byte, erro
 		}
 		rel = filepath.Clean(rel)
 		if rel == "." || rel == "" {
-			return nil, errors.New("path aponta para o root (esperado arquivo)")
+			return nil, errors.New("path resolves to repository root (expected a file)")
 		}
 		if strings.HasPrefix(rel, ".."+string(filepath.Separator)) || rel == ".." {
-			return nil, fmt.Errorf("path fora do RootDir: %s", path)
+			return nil, fmt.Errorf("path escapes RootDir: %s", path)
 		}
 		path = rel
 	}

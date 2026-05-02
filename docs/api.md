@@ -1,24 +1,24 @@
-# API HTTP (`godeployd`)
+# HTTP API (`godeployd`)
 
-Base URL: valor de `GODEPLOY_ADDR` (por defeito `http://127.0.0.1:8081`).
+Base URL: value of `GODEPLOY_ADDR` (default `http://127.0.0.1:8081`).
 
 ## `GET /healthz`
 
-- **Resposta**: `200` com corpo textual `ok` (liveness).
-- **Cabeçalhos**: as respostas do daemon passam pelo middleware de segurança (`Cache-Control: no-store`, `X-Content-Type-Options: nosniff`, etc.).
-- **Uso**: balanceadores e Kubernetes probes.
+- **Response**: `200` with plain body `ok` (liveness).
+- **Headers**: daemon responses go through security middleware (`Cache-Control: no-store`, `X-Content-Type-Options: nosniff`, etc.).
+- **Usage**: load balancers and Kubernetes probes.
 
 ## `POST /webhook`
 
-- **Corpo**: payload JSON bruto do GitHub ou GitLab (o mesmo corpo usado na verificação de assinatura).
-- **Cabeçalhos GitHub**: `X-GitHub-Event`, opcionalmente `X-Hub-Signature-256` se `GODEPLOY_WEBHOOK_SECRET` estiver definido.
-- **Cabeçalhos GitLab**: `X-Gitlab-Event`, opcionalmente `X-Gitlab-Token` se o secret estiver definido.
-- **Rate limit**: token bucket por IP remoto (`GODEPLOY_WEBHOOK_RPS`, `GODEPLOY_WEBHOOK_BURST`).
-- **Tamanho máximo do corpo**: 1 MiB no servidor atual.
-- **Respostas de erro**: mensagens genéricas em 4xx/5xx; detalhes no log estruturado.
-- **Sucesso (`push` processado)**: `200` com `Content-Type: application/json` e corpo com campos como `provider`, `app`, `runtime`, `image_tag`, `new_container_id`, `old_container_id`, `routed_target` (ver `handleWebhook` em `cmd/godeployd`).
+- **Body**: raw JSON payload from GitHub or GitLab (same bytes used for signature verification).
+- **GitHub headers**: `X-GitHub-Event`, optionally `X-Hub-Signature-256` when `GODEPLOY_WEBHOOK_SECRET` is set.
+- **GitLab headers**: `X-Gitlab-Event`, optionally `X-Gitlab-Token` when a secret is configured.
+- **Rate limit**: token bucket per remote IP (`GODEPLOY_WEBHOOK_RPS`, `GODEPLOY_WEBHOOK_BURST`).
+- **Max body size**: 1 MiB in the current server.
+- **Error responses**: generic messages on 4xx/5xx; details in structured logs.
+- **Success (processed `push`)**: `200` with `Content-Type: application/json` and fields such as `provider`, `app`, `runtime`, `image_tag`, `new_container_id`, `old_container_id`, `routed_target` (see `handleWebhook` in `cmd/godeployd`).
 
-Exemplo mínimo (GitHub ping ou push real substitui o corpo):
+Minimal example (GitHub ping or replace body with a real push):
 
 ```bash
 curl -sS -X POST "http://127.0.0.1:8081/webhook" \
@@ -29,14 +29,14 @@ curl -sS -X POST "http://127.0.0.1:8081/webhook" \
 
 ## `GET /api/stats`
 
-- **Resposta**: `application/json` com lista de contentores em execução e métricas aproximadas de CPU/memória.
-- **Timeout interno**: janela curta no handler; falhas de coleta devolvem `500` sem expor stack ao cliente.
+- **Response**: `application/json` with a list of running containers and approximate CPU/memory metrics.
+- **Internal timeout**: short window in the handler; collection failures return `500` without exposing stack traces to the client.
 
-## `GET /api/ws/logs?container=<id|nome>`
+## `GET /api/ws/logs?container=<id|name>`
 
 - **Upgrade**: WebSocket.
-- **Query**: `container` obrigatório (ID ou nome Docker).
-- **Origem**: pedidos de browser só com mesma `Host` ou origens listadas em `GODEPLOY_WS_ALLOWED_ORIGINS`.
-- **Mensagens**: JSON por linha (`stream`, `line`) conforme implementação em `internal/observability`.
+- **Query**: `container` is required (Docker ID or name).
+- **Origin**: browser requests only with the same `Host` or origins listed in `GODEPLOY_WS_ALLOWED_ORIGINS`.
+- **Messages**: JSON per line (`stream`, `line`) as implemented in `internal/observability`.
 
-Cliente de referência: `cmd/godeploy-logtail`.
+Reference client: `cmd/godeploy-logtail`.

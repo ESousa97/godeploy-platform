@@ -83,10 +83,10 @@ type RunResult struct {
 // without a Docker socket until a webhook runs (e.g. distroless self-deploy).
 func New(cfg Config) (*Runner, error) {
 	if cfg.DB == nil {
-		return nil, errors.New("DB nao pode ser nil")
+		return nil, errors.New("DB cannot be nil")
 	}
 	if cfg.Docker == nil {
-		return nil, errors.New("docker nao pode ser nil")
+		return nil, errors.New("docker cannot be nil")
 	}
 	if strings.TrimSpace(cfg.NetworkName) == "" {
 		cfg.NetworkName = "godeploy"
@@ -149,7 +149,7 @@ func (r *Runner) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 
 	tmpDir, err := os.MkdirTemp("", "godeploy-*")
 	if err != nil {
-		return out, fmt.Errorf("falha ao criar temp dir: %w", err)
+		return out, fmt.Errorf("failed to create temp dir: %w", err)
 	}
 	defer func() {
 		if rmErr := os.RemoveAll(tmpDir); rmErr != nil {
@@ -194,7 +194,7 @@ func (r *Runner) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 
 	if err := waitHTTP200(ctx, "http://"+newTarget+healthPath, r.cfg.HealthTimeout); err != nil {
 		r.warnSafeRemove(cleanupCtx, deployRes.NewContainerID, "cleanup new container")
-		return out, fmt.Errorf("healthcheck falhou: %w", err)
+		return out, fmt.Errorf("healthcheck failed: %w", err)
 	}
 
 	if err := r.store.UpsertRoute(ctx, req.Domain, newTarget); err != nil {
@@ -220,13 +220,13 @@ func trimRunRequest(req *RunRequest) {
 
 func (r *Runner) validateRunRequest(req *RunRequest) error {
 	if req.AppName == "" {
-		return errors.New("AppName nao pode ser vazio")
+		return errors.New("AppName cannot be empty")
 	}
 	if req.Domain == "" {
 		req.Domain = fmt.Sprintf("%s.local", normalizeApp(req.AppName))
 	}
 	if req.CloneURL == "" {
-		return errors.New("CloneURL nao pode ser vazio")
+		return errors.New("CloneURL cannot be empty")
 	}
 	if req.ImageName == "" {
 		req.ImageName = fmt.Sprintf("%s/%s", r.cfg.DefaultImagePrefix, normalizeApp(req.AppName))
@@ -268,7 +268,7 @@ func (r *Runner) resolvePublishedTarget(ctx context.Context, deployRes scheduler
 	fallback, ferr := inferPublishedPort(ctx, r.cfg.Docker, deployRes.NewContainerID, internalPort)
 	if ferr != nil {
 		r.warnSafeRemove(cleanupCtx, deployRes.NewContainerID, "cleanup new container")
-		return "", fmt.Errorf("falha ao resolver porta publicada do novo container: %w", ferr)
+		return "", fmt.Errorf("failed to resolve published port of new container: %w", ferr)
 	}
 	return fmt.Sprintf("127.0.0.1:%s", fallback), nil
 }
@@ -339,7 +339,7 @@ func waitHTTP200(ctx context.Context, target string, timeout time.Duration) erro
 			if lastErr == nil {
 				lastErr = timeoutCtx.Err()
 			}
-			return fmt.Errorf("timeout aguardando 200 OK em %s: %w", target, lastErr)
+			return fmt.Errorf("timeout waiting for 200 OK on %s: %w", target, lastErr)
 		case <-ticker.C:
 			req, reqErr := http.NewRequestWithContext(timeoutCtx, http.MethodGet, target, http.NoBody)
 			if reqErr != nil {
@@ -382,7 +382,7 @@ func gitClone(ctx context.Context, dstDir, cloneURL, ref string) error {
 	cmd := exec.CommandContext(ctx, "git", args...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("falha no git clone: %w: %s", err, strings.TrimSpace(string(out)))
+		return fmt.Errorf("git clone failed: %w: %s", err, strings.TrimSpace(string(out)))
 	}
 	return nil
 }
@@ -398,7 +398,7 @@ func defaultPortForRuntime(rt detector.Runtime) int {
 	case detector.RuntimeGo:
 		return 8080
 	case detector.RuntimeDockerfile:
-		// Melhor chute default: 8080 (pode ser sobrescrito no futuro via config/manifest).
+		// Sensible default: 8080 (may be overridden later via config/manifest).
 		return 8080
 	default:
 		return 8080
@@ -413,11 +413,11 @@ func inferPublishedPort(ctx context.Context, docker *client.Client, containerID 
 	key := fmt.Sprintf("%d/tcp", internalPort)
 	bindings := inspect.NetworkSettings.Ports
 	if bindings == nil {
-		return "", errors.New("container sem port bindings")
+		return "", errors.New("container has no port bindings")
 	}
 	published := bindings[nat.Port(key)]
 	if len(published) == 0 {
-		return "", fmt.Errorf("porta %s nao publicada", key)
+		return "", fmt.Errorf("port %s not published", key)
 	}
 	return strings.TrimSpace(published[0].HostPort), nil
 }
@@ -443,11 +443,10 @@ func normalizeApp(name string) string {
 	return name
 }
 
-// warnIfLocalRepoDirty avisa quando o pipeline esta clonando um repositorio
-// local (file://) cujo working tree contem alteracoes nao commitadas. O
-// git clone sempre copia o HEAD do remoto, entao mudancas nao commitadas
-// silenciosamente nao entram na imagem construida — uma fonte comum de
-// "porque o container subiu com o codigo errado?" ao testar self-deploy.
+// warnIfLocalRepoDirty logs when the pipeline clones a local repository
+// (file://) whose working tree has uncommitted changes. git clone always
+// copies the remote HEAD, so uncommitted changes never reach the built image —
+// a common source of "why did the container run the wrong code?" when testing self-deploy.
 func (r *Runner) warnIfLocalRepoDirty(ctx context.Context, req RunRequest) {
 	root, ok := localFileRepoRoot(req.CloneURL)
 	if !ok {
@@ -458,7 +457,7 @@ func (r *Runner) warnIfLocalRepoDirty(ctx context.Context, req RunRequest) {
 		return
 	}
 	r.cfg.Logger.Warn(
-		"working tree do repositorio local com mudancas nao commitadas; o build vai usar apenas o HEAD",
+		"local repository working tree has uncommitted changes; build will use HEAD only",
 		slog.String("app", req.AppName),
 		slog.String("repo", root),
 		slog.String("ref", req.Ref),
@@ -466,8 +465,8 @@ func (r *Runner) warnIfLocalRepoDirty(ctx context.Context, req RunRequest) {
 	)
 }
 
-// localFileRepoRoot devolve o diretorio local apontado por uma cloneURL
-// `file://...`. Retorna ok=false para outros esquemas ou paths invalidos.
+// localFileRepoRoot returns the local directory pointed to by a `file://...`
+// cloneURL. Returns ok=false for other schemes or invalid paths.
 func localFileRepoRoot(cloneURL string) (string, bool) {
 	cloneURL = strings.TrimSpace(cloneURL)
 	if cloneURL == "" {
@@ -478,7 +477,7 @@ func localFileRepoRoot(cloneURL string) (string, bool) {
 		return "", false
 	}
 	p := u.Path
-	// Em Windows file:///D:/foo, url.Path vem como "/D:/foo"; normaliza para "D:/foo".
+	// On Windows file:///D:/foo, url.Path is "/D:/foo"; normalize to "D:/foo".
 	if runtime.GOOS == "windows" && len(p) > 3 && p[0] == '/' && p[2] == ':' {
 		p = p[1:]
 	}
@@ -492,8 +491,8 @@ func localFileRepoRoot(cloneURL string) (string, bool) {
 	return p, true
 }
 
-// gitWorkingTreeDirty roda `git status --porcelain` em root e retorna se ha
-// arquivos modificados/staged/untracked, junto com a contagem.
+// gitWorkingTreeDirty runs `git status --porcelain` in root and reports whether
+// there are modified/staged/untracked files, with a line count.
 func gitWorkingTreeDirty(ctx context.Context, root string) (dirty bool, files int, err error) {
 	cmd := exec.CommandContext(ctx, "git", "status", "--porcelain")
 	cmd.Dir = root

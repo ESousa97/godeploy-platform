@@ -75,18 +75,18 @@ type ResourceConflictError struct {
 
 // Error implements the [error] interface.
 func (e *ResourceConflictError) Error() string {
-	return fmt.Sprintf("conflito de %s (%s): %s", e.Resource, e.Value, e.Details)
+	return fmt.Sprintf("%s conflict (%s): %s", e.Resource, e.Value, e.Details)
 }
 
-// New returns a Scheduler. A rede networkName e criada na primeira [Scheduler.DeployWithOptions]
-// (via [EnsurePaaSNetwork]), para que componentes sem acesso ao Docker socket (ex.: godeployd dentro
-// de um contentor sem bind de /var/run/docker.sock) consigam arrancar o HTTP server e passar no healthcheck.
+// New returns a Scheduler. The networkName network is created on the first [Scheduler.DeployWithOptions]
+// call (via [EnsurePaaSNetwork]) so components without access to the Docker socket (e.g. godeployd inside
+// a container without /var/run/docker.sock bind-mounted) can still start the HTTP server and pass the health check.
 func New(_ context.Context, docker *client.Client, networkName string) (*Scheduler, error) {
 	if docker == nil {
-		return nil, errors.New("docker client nao pode ser nil")
+		return nil, errors.New("docker client cannot be nil")
 	}
 	if strings.TrimSpace(networkName) == "" {
-		return nil, errors.New("networkName nao pode ser vazio")
+		return nil, errors.New("networkName cannot be empty")
 	}
 
 	return &Scheduler{
@@ -95,7 +95,7 @@ func New(_ context.Context, docker *client.Client, networkName string) (*Schedul
 	}, nil
 }
 
-// EnsurePaaSNetwork garante que a rede dedicada existe e retorna seu ID.
+// EnsurePaaSNetwork ensures the dedicated network exists and returns its ID.
 func EnsurePaaSNetwork(ctx context.Context, docker *client.Client, networkName string) (string, error) {
 	existingID, err := findNetworkByName(ctx, docker, networkName)
 	if err != nil {
@@ -112,26 +112,26 @@ func EnsurePaaSNetwork(ctx context.Context, docker *client.Client, networkName s
 		},
 	})
 	if err != nil {
-		// Corrida entre schedulers: outro processo pode ter criado a rede.
+		// Race between schedulers: another process may have created the network.
 		if cerrdefs.IsConflict(err) {
 			existingID, lookupErr := findNetworkByName(ctx, docker, networkName)
 			if lookupErr == nil && existingID != "" {
 				return existingID, nil
 			}
 		}
-		return "", fmt.Errorf("falha ao criar network %q: %w", networkName, err)
+		return "", fmt.Errorf("failed to create network %q: %w", networkName, err)
 	}
 
 	return resp.ID, nil
 }
 
-// Deploy sobe uma nova versao com recursos limitados e remove a versao antiga
-// somente apos a nova estar em execucao (blue-green basico).
+// Deploy runs a new version with resource limits and removes the old version
+// only after the new one is running (basic blue-green).
 func (s *Scheduler) Deploy(ctx context.Context, app App) (DeploymentResult, error) {
 	return s.DeployWithOptions(ctx, app, DeployOptions{})
 }
 
-// DeployWithOptions é o Deploy com opções adicionais (ex.: manter versão antiga).
+// DeployWithOptions is [Scheduler.Deploy] with extra options (e.g. keep the old version).
 func (s *Scheduler) DeployWithOptions(ctx context.Context, app App, opts DeployOptions) (DeploymentResult, error) {
 	var out DeploymentResult
 
@@ -174,16 +174,16 @@ func (s *Scheduler) DeployWithOptions(ctx context.Context, app App, opts DeployO
 	}()
 
 	if err := s.docker.ContainerStart(ctx, createResp.ID, container.StartOptions{}); err != nil {
-		return out, fmt.Errorf("falha ao iniciar novo container %q: %w", newContainerName, err)
+		return out, fmt.Errorf("failed to start new container %q: %w", newContainerName, err)
 	}
 
 	if err := s.waitContainerRunning(ctx, createResp.ID); err != nil {
-		// Captura os logs antes do defer remover o container, para preservar o motivo real da falha.
+		// Capture logs before the defer removes the container to preserve the real failure reason.
 		tail := s.fetchContainerLogsTail(detach, createResp.ID)
 		if tail != "" {
-			return out, fmt.Errorf("novo container %q nao ficou running: %w; logs:\n%s", newContainerName, err, tail)
+			return out, fmt.Errorf("new container %q did not reach running: %w; logs:\n%s", newContainerName, err, tail)
 		}
-		return out, fmt.Errorf("novo container %q nao ficou running: %w", newContainerName, err)
+		return out, fmt.Errorf("new container %q did not reach running: %w", newContainerName, err)
 	}
 	started = true
 
@@ -201,8 +201,8 @@ func (s *Scheduler) DeployWithOptions(ctx context.Context, app App, opts DeployO
 func (s *Scheduler) resolveHostPortBinding(ctx context.Context, app App, oldContainer *container.Summary) (nat.Port, nat.PortBinding, error) {
 	appPort := nat.Port(fmt.Sprintf("%d/tcp", app.InternalPort))
 	hostBinding := nat.PortBinding{HostIP: "0.0.0.0", HostPort: strconv.Itoa(app.InternalPort)}
-	// Quando existe versao antiga, usamos porta dinamica no novo container para
-	// evitar downtime durante o overlap do blue-green.
+	// When an old version exists, use a dynamic host port on the new container
+	// to avoid downtime during blue-green overlap.
 	if oldContainer != nil {
 		hostBinding.HostPort = ""
 		return appPort, hostBinding, nil
@@ -231,7 +231,7 @@ func (s *Scheduler) deployContainerSpecs(app App, appPort nat.Port, hostBinding 
 		NetworkMode:  container.NetworkMode(s.networkName),
 	}
 	if envTruthy(os.Getenv("GODEPLOY_BIND_DOCKER_SOCK")) {
-		// Permite correr godeployd (ou outras ferramentas) dentro do contentor com acesso ao motor Docker do host.
+		// Allow godeployd (or other tools) inside the container to access the host Docker engine.
 		hostConfig.Binds = append(hostConfig.Binds, "/var/run/docker.sock:/var/run/docker.sock")
 	}
 	networkConfig := &network.NetworkingConfig{
@@ -254,29 +254,29 @@ func (s *Scheduler) finishOldContainer(ctx context.Context, oldContainer *contai
 	}
 	timeout := int(defaultStopTimeout.Seconds())
 	if stopErr := s.docker.ContainerStop(ctx, oldContainer.ID, container.StopOptions{Timeout: &timeout}); stopErr != nil && !cerrdefs.IsNotFound(stopErr) {
-		return fmt.Errorf("novo container ativo, mas falha ao parar antigo %q: %w", oldContainer.ID, stopErr)
+		return fmt.Errorf("new deployment active, but failed to stop old container %q: %w", oldContainer.ID, stopErr)
 	}
 	if rmErr := s.docker.ContainerRemove(ctx, oldContainer.ID, container.RemoveOptions{Force: true}); rmErr != nil && !cerrdefs.IsNotFound(rmErr) {
-		return fmt.Errorf("novo container ativo, mas falha ao remover antigo %q: %w", oldContainer.ID, rmErr)
+		return fmt.Errorf("new deployment active, but failed to remove old container %q: %w", oldContainer.ID, rmErr)
 	}
 	return nil
 }
 
 func (a App) validate() error {
 	if strings.TrimSpace(a.Name) == "" {
-		return errors.New("nome da app nao pode ser vazio")
+		return errors.New("app name cannot be empty")
 	}
 	if strings.TrimSpace(a.Image) == "" {
-		return errors.New("imagem da app nao pode ser vazia")
+		return errors.New("app image cannot be empty")
 	}
 	if a.InternalPort < 1 || a.InternalPort > 65535 {
-		return fmt.Errorf("porta interna invalida: %d", a.InternalPort)
+		return fmt.Errorf("invalid internal port: %d", a.InternalPort)
 	}
 	if a.CPULimit < 0 {
-		return fmt.Errorf("limite de CPU invalido: %.2f", a.CPULimit)
+		return fmt.Errorf("invalid CPU limit: %.2f", a.CPULimit)
 	}
 	if a.MemoryLimit < 0 {
-		return fmt.Errorf("limite de RAM invalido: %dMB", a.MemoryLimit)
+		return fmt.Errorf("invalid RAM limit: %dMB", a.MemoryLimit)
 	}
 	return nil
 }
@@ -302,7 +302,7 @@ func findNetworkByName(ctx context.Context, docker *client.Client, networkName s
 
 	list, err := docker.NetworkList(ctx, network.ListOptions{Filters: args})
 	if err != nil {
-		return "", fmt.Errorf("falha ao listar networks: %w", err)
+		return "", fmt.Errorf("failed to list networks: %w", err)
 	}
 
 	for _, n := range list {
@@ -324,7 +324,7 @@ func (s *Scheduler) findCurrentContainer(ctx context.Context, appName string) (*
 		Filters: args,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("falha ao buscar versao atual da app %q: %w", appName, err)
+		return nil, fmt.Errorf("failed to fetch current app version %q: %w", appName, err)
 	}
 
 	if len(containers) == 0 {
@@ -349,7 +349,7 @@ func (s *Scheduler) findCurrentContainer(ctx context.Context, appName string) (*
 func (s *Scheduler) detectPortConflict(ctx context.Context, hostPort int) error {
 	containers, err := s.docker.ContainerList(ctx, container.ListOptions{All: false})
 	if err != nil {
-		return fmt.Errorf("falha ao validar conflitos de porta: %w", err)
+		return fmt.Errorf("failed to validate port conflicts: %w", err)
 	}
 
 	for _, c := range containers {
@@ -358,18 +358,18 @@ func (s *Scheduler) detectPortConflict(ctx context.Context, hostPort int) error 
 				continue
 			}
 			return &ResourceConflictError{
-				Resource: "porta",
+				Resource: "port",
 				Value:    strconv.Itoa(hostPort),
-				Details:  fmt.Sprintf("porta ja publicada pelo container %s (%v)", c.ID[:12], c.Names),
+				Details:  fmt.Sprintf("port already published by container %s (%v)", c.ID[:12], c.Names),
 			}
 		}
 	}
 	return nil
 }
 
-// fetchContainerLogsTail tenta ler até [failedLogsTailLines] linhas dos logs de um container
-// recém criado que falhou em ficar running. Best-effort: nunca propaga erro do Docker; em caso
-// de falha retorna string vazia para que o caller mantenha apenas o erro original.
+// fetchContainerLogsTail tries to read up to [failedLogsTailLines] lines from logs of a
+// newly created container that failed to become running. Best-effort: never propagates Docker errors; on
+// failure returns an empty string so the caller keeps only the original error.
 func (s *Scheduler) fetchContainerLogsTail(ctx context.Context, containerID string) string {
 	logsCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
@@ -385,7 +385,7 @@ func (s *Scheduler) fetchContainerLogsTail(ctx context.Context, containerID stri
 	defer iox.Close(rc)
 
 	var stdout, stderr bytes.Buffer
-	// stdcopy demultiplexa o stream multiplexado do Docker (stdout/stderr) quando o container nao usa TTY.
+	// stdcopy demultiplexes Docker's multiplexed stream (stdout/stderr) when the container does not use a TTY.
 	if _, err := stdcopy.StdCopy(&stdout, &stderr, rc); err != nil && stdout.Len() == 0 && stderr.Len() == 0 {
 		return ""
 	}
@@ -395,7 +395,7 @@ func (s *Scheduler) fetchContainerLogsTail(ctx context.Context, containerID stri
 		return ""
 	}
 	if len(combined) > failedLogsMaxBytes {
-		combined = "...(truncado)...\n" + combined[len(combined)-failedLogsMaxBytes:]
+		combined = "...(truncated)...\n" + combined[len(combined)-failedLogsMaxBytes:]
 	}
 	return combined
 }
@@ -410,17 +410,17 @@ func (s *Scheduler) waitContainerRunning(ctx context.Context, containerID string
 	for {
 		select {
 		case <-timeoutCtx.Done():
-			return fmt.Errorf("timeout aguardando estado running")
+			return fmt.Errorf("timeout waiting for running state")
 		case <-ticker.C:
 			inspect, err := s.docker.ContainerInspect(timeoutCtx, containerID)
 			if err != nil {
-				return fmt.Errorf("falha ao inspecionar container: %w", err)
+				return fmt.Errorf("failed to inspect container: %w", err)
 			}
 			if inspect.State != nil && inspect.State.Running {
 				return nil
 			}
 			if inspect.State != nil && inspect.State.Status == "exited" {
-				return fmt.Errorf("container finalizou prematuramente com codigo %d", inspect.State.ExitCode)
+				return fmt.Errorf("container exited early with code %d", inspect.State.ExitCode)
 			}
 		}
 	}
@@ -431,7 +431,7 @@ func classifyCreateError(err error, containerName string, port int) error {
 
 	if cerrdefs.IsConflict(err) && strings.Contains(msg, "already in use") {
 		return &ResourceConflictError{
-			Resource: "nome",
+			Resource: "name",
 			Value:    containerName,
 			Details:  err.Error(),
 		}
@@ -440,13 +440,13 @@ func classifyCreateError(err error, containerName string, port int) error {
 	if strings.Contains(msg, "port is already allocated") ||
 		strings.Contains(msg, "address already in use") {
 		return &ResourceConflictError{
-			Resource: "porta",
+			Resource: "port",
 			Value:    strconv.Itoa(port),
 			Details:  err.Error(),
 		}
 	}
 
-	return fmt.Errorf("falha ao criar container: %w", err)
+	return fmt.Errorf("failed to create container: %w", err)
 }
 
 func envTruthy(v string) bool {

@@ -55,7 +55,7 @@ func (c *Collector) Collect(ctx context.Context) (StatsResponse, error) {
 
 	list, err := c.docker.ContainerList(ctx, container.ListOptions{All: false})
 	if err != nil {
-		return StatsResponse{}, fmt.Errorf("listar containers: %w", err)
+		return StatsResponse{}, fmt.Errorf("list containers: %w", err)
 	}
 
 	out := make([]ContainerStat, 0, len(list))
@@ -67,8 +67,8 @@ func (c *Collector) Collect(ctx context.Context) (StatsResponse, error) {
 
 		st, err := c.collectOne(ctx, ctr.ID)
 		if err != nil {
-			// Em caso de erro pontual, ainda retornamos o restante.
-			// O caller pode decidir como exibir/monitorar estes casos.
+			// On a single-container failure, still return the rest.
+			// The caller decides how to present or monitor skipped entries.
 			continue
 		}
 		st.ID = ctr.ID
@@ -158,7 +158,7 @@ func computeCPUPercent(systemNow, systemPrev, cpuNow, cpuPrev uint64, onlineNow,
 
 	online := float64(onlineNow)
 	if online <= 0 {
-		// fallback: usa len(percpu_usage) se online_cpus não vier preenchido
+		// fallback: use len(percpu_usage) when online_cpus is missing
 		if n := len(perCPU); n > 0 {
 			online = float64(n)
 		} else if onlinePrev > 0 {
@@ -179,8 +179,8 @@ func clampPercent(v float64) float64 {
 		return 0
 	}
 	if v > 100*1024 {
-		// em máquinas grandes (muitos cores) pode passar de 100% facilmente;
-		// ainda assim colocamos um teto alto para evitar valores absurdos.
+		// On large machines (many cores) CPU% can exceed 100% easily;
+		// still cap at a high ceiling to avoid absurd values.
 		return 100 * 1024
 	}
 	return v

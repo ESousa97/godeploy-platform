@@ -56,11 +56,6 @@ linters:
       disable:
         - fieldalignment
         - shadow
-    misspell:
-      # Comentarios em PT-BR; estas palavras parecem misspells de termos em ingles para o linter.
-      ignore-rules:
-        - componentes
-        - processos
     revive:
       rules:
         - name: exported

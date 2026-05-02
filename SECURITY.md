@@ -21,17 +21,17 @@ Security fixes are applied on the **default branch** (`main`) going forward. Tag
 
 ## Dependency scanning
 
-O cliente Go `github.com/docker/docker` é mantido na **versão mais recente compatível** com o código; `govulncheck` ainda pode listar avisos (GO-2026-4887, GO-2026-4883) com *Fixed in: N/A* no banco de vulnerabilidades, porque o motor de análise associa o módulo ao código do Moby/daemon.
+The Go client `github.com/docker/docker` is kept on the **latest version compatible** with this codebase; `govulncheck` may still list findings (GO-2026-4887, GO-2026-4883) with *Fixed in: N/A* in the vulnerability database, because the analysis engine associates the module with Moby/daemon code paths.
 
-Este repositório usa o pacote **apenas como cliente HTTP** da API do Docker Engine (imagens, contentores, redes). Os vetores descritos nos avisos referem-se a componentes do **daemon** (AuthZ, plugins), não ao binário `godeployd`. Mesmo assim, execute `govulncheck ./...` em cada release e mantenha o Engine Docker atualizado no host.
+This repository uses the package **only as an HTTP client** for the Docker Engine API (images, containers, networks). Vectors described in those advisories target **daemon** components (AuthZ, plugins), not the `godeployd` binary. Still, run `govulncheck ./...` on each release and keep Docker Engine updated on the host.
 
-Mitigações aplicadas no `godeployd` e serviços relacionados:
+Mitigations in `godeployd` and related services:
 
-- `/webhook`: **limite de body** (`http.MaxBytesReader`), **rate limit** por IP (`GODEPLOY_WEBHOOK_RPS` / `GODEPLOY_WEBHOOK_BURST`), respostas de erro **sem vazamento** de detalhes internos em 500.
-- **Headers de segurança** HTTP (nosniff, frame deny, referrer-policy, permissions-policy, `Cache-Control: no-store` no `godeployd`).
-- **WebSocket** `/api/ws/logs`: `CheckOrigin` restritivo (mesmo host + lista opcional `GODEPLOY_WS_ALLOWED_ORIGINS`); mensagens de erro de stream sem detalhes do daemon.
-- **Proxy** (`internal/proxy`): timeouts no `http.Server` e `Transport` para upstream.
-- **Pipeline**: cliente HTTP do healthcheck com `Transport` com timeouts explícitos.
-- Logging estruturado com **`log/slog`** no daemon e na pipeline.
+- `/webhook`: **body limit** (`http.MaxBytesReader`), **rate limit** per IP (`GODEPLOY_WEBHOOK_RPS` / `GODEPLOY_WEBHOOK_BURST`), **no internal detail leakage** on 500 responses.
+- **HTTP security headers** (nosniff, frame deny, referrer-policy, permissions-policy, `Cache-Control: no-store` on `godeployd`).
+- **WebSocket** `/api/ws/logs`: restrictive `CheckOrigin` (same host + optional `GODEPLOY_WS_ALLOWED_ORIGINS`); stream errors without daemon internals.
+- **Proxy** (`internal/proxy`): timeouts on `http.Server` and upstream `Transport`.
+- **Pipeline**: health-check HTTP client uses an explicit-timeout `Transport`.
+- Structured logging with **`log/slog`** in the daemon and pipeline.
 
-Se você acredita que existe um vetor explorável neste repositório, por favor reporte de forma responsável conforme as instruções acima.
+If you believe there is an exploitable issue in this repository, please report it responsibly using the instructions above.

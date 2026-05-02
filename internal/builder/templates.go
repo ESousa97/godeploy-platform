@@ -31,18 +31,18 @@ RUN set -eux; \
 				case "$p" in */cmd/$want) go build -trimpath -ldflags="-s -w" -o /out/app "$p"; exit 0 ;; esac; \
 			done; \
 		done; \
-		echo "godeploy: varios pacotes main em ./cmd/...; defina um Dockerfile na raiz do repositorio" >&2; exit 1; \
+		echo "godeploy: multiple main packages under ./cmd/...; add a Dockerfile at the repository root" >&2; exit 1; \
 	else \
 		mains=$(go list -f '{{if eq .Name "main"}}{{.ImportPath}} {{end}}' . 2>/dev/null || true); \
 		set -- $mains; \
 		if [ "$#" -eq 1 ] && [ -n "$1" ]; then \
 			go build -trimpath -ldflags="-s -w" -o /out/app "$1"; \
 		else \
-			echo "godeploy: nenhum pacote main em ./cmd/... nem na raiz; defina um Dockerfile na raiz" >&2; exit 1; \
+			echo "godeploy: no main package under ./cmd/... or at repo root; add a Dockerfile at the repository root" >&2; exit 1; \
 		fi; \
 	fi
 
-# Imagem root (nao :nonroot) para permitir GODEPLOY_BIND_DOCKER_SOCK ao self-host do godeployd.
+# Root image (not :nonroot) so GODEPLOY_BIND_DOCKER_SOCK works when self-hosting godeployd.
 FROM gcr.io/distroless/static-debian12
 WORKDIR /app
 COPY --from=build /out/app /app/app
@@ -98,6 +98,6 @@ EXPOSE 80
 `) + "\n", nil
 
 	default:
-		return "", fmt.Errorf("runtime nao suportado para template: %s", rt)
+		return "", fmt.Errorf("runtime not supported for template: %s", rt)
 	}
 }

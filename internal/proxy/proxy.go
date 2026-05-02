@@ -26,30 +26,30 @@ type Config struct {
 	Logger *slog.Logger
 }
 
-// Proxy é um reverse proxy dinâmico roteado por Host.
-// Ele mantém um cache em memória e faz hot reload quando as rotas mudam no SQLite.
+// Proxy is a Host-routed dynamic reverse proxy.
+// It keeps an in-memory cache and hot-reloads when routes change in SQLite.
 type Proxy struct {
 	cfg   Config
 	store *Store
 
-	// routes guarda snapshot imutável: map[domain]target
+	// routes holds an immutable snapshot: map[domain]target
 	routes atomic.Value
 
-	// lastVersion é atualizado após cada reload.
+	// lastVersion is updated after each reload.
 	lastVersion atomic.Int64
 
-	// notify força um reload imediato (ex.: após deploy).
+	// notify forces an immediate reload (e.g. after deploy).
 	notify chan struct{}
 
-	// upstream reutiliza um pool de ligações; um Transport por pedido esgotava sockets
-	// em testes com muitos ServeHTTP (ex. hot-reload em loop).
+	// upstream reuses a connection pool; one Transport per request exhausted sockets
+	// in tests with many ServeHTTP calls (e.g. hot-reload loops).
 	upstream *http.Transport
 }
 
 // New builds a [Proxy] backed by cfg.DB. Schema creation happens on [Proxy.Run].
 func New(cfg Config) (*Proxy, error) {
 	if cfg.DB == nil {
-		return nil, errors.New("DB nao pode ser nil")
+		return nil, errors.New("DB cannot be nil")
 	}
 	if strings.TrimSpace(cfg.Addr) == "" {
 		cfg.Addr = ":80"
@@ -83,8 +83,8 @@ func New(cfg Config) (*Proxy, error) {
 	return p, nil
 }
 
-// NotifyReload acorda o loop de hot reload imediatamente.
-// Use isto ao final de um deploy (após persistir a rota no SQLite) para refletir a mudança sem delay.
+// NotifyReload wakes the hot-reload loop immediately.
+// Call this after a deploy (once the route is persisted in SQLite) to reflect the change without polling delay.
 func (p *Proxy) NotifyReload() {
 	select {
 	case p.notify <- struct{}{}:
@@ -92,7 +92,7 @@ func (p *Proxy) NotifyReload() {
 	}
 }
 
-// Run inicia o servidor HTTP e o loop de hot reload. Bloqueia até ctx cancelar.
+// Run starts the HTTP server and the hot-reload loop. Blocks until ctx is cancelled.
 func (p *Proxy) Run(ctx context.Context) error {
 	if err := p.store.EnsureSchema(ctx); err != nil {
 		return err
@@ -113,7 +113,7 @@ func (p *Proxy) Run(ctx context.Context) error {
 
 	errCh := make(chan error, 1)
 	go func() {
-		// http.Server.ListenAndServe retorna http.ErrServerClosed em shutdown normal.
+		// http.Server.ListenAndServe returns http.ErrServerClosed on normal shutdown.
 		if err := srv.ListenAndServe(); err != nil {
 			errCh <- err
 			return
@@ -174,14 +174,14 @@ func (p *Proxy) reloadIfChanged(ctx context.Context, force bool) error {
 		return nil
 	}
 
-	// snapshot imutável
+	// immutable snapshot
 	p.routes.Store(routes)
 	p.lastVersion.Store(v)
 	return nil
 }
 
 func clientIP(r *http.Request) string {
-	// r.RemoteAddr é "ip:port"
+	// r.RemoteAddr is "ip:port"
 	host, _, err := net.SplitHostPort(strings.TrimSpace(r.RemoteAddr))
 	if err != nil {
 		return strings.TrimSpace(r.RemoteAddr)
@@ -206,19 +206,19 @@ func appendXForwardedFor(h http.Header, ip string) {
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	host := normalizeDomain(r.Host)
 	if host == "" {
-		http.Error(w, "host obrigatorio", http.StatusBadRequest)
+		http.Error(w, "host required", http.StatusBadRequest)
 		return
 	}
 
 	raw := p.routes.Load()
 	snap, snapOK := raw.(map[string]string)
 	if !snapOK || snap == nil {
-		http.Error(w, "rotas indisponiveis", http.StatusInternalServerError)
+		http.Error(w, "routes unavailable", http.StatusInternalServerError)
 		return
 	}
 	target, hasRoute := snap[host]
 	if !hasRoute {
-		http.Error(w, "rota nao encontrada", http.StatusNotFound)
+		http.Error(w, "route not found", http.StatusNotFound)
 		return
 	}
 
@@ -226,10 +226,10 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	proxy := &httputil.ReverseProxy{
 		Transport: p.upstream,
 		Rewrite: func(pr *httputil.ProxyRequest) {
-			// Define upstream URL (host+scheme) e mantém path/query.
+			// Set upstream URL (host+scheme) and keep path/query.
 			pr.SetURL(targetURL)
 
-			// Encaminhamento de headers.
+			// Forward headers.
 			out := pr.Out
 			out.Host = targetURL.Host
 
@@ -250,8 +250,8 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			http.Error(rw, "bad gateway", http.StatusBadGateway)
 		},
 		ModifyResponse: func(resp *http.Response) error {
-			// Garante que caches intermediários não “congelem” rotas durante rollout.
-			// (especialmente útil em ambientes simples de estudo).
+			// Avoid intermediate caches “freezing” routes during rollout.
+			// (Especially useful in simple lab setups.)
 			resp.Header.Del("Server")
 			return nil
 		},
