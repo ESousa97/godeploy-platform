@@ -64,7 +64,7 @@ jobs:
           go test -race -short -covermode=atomic -coverprofile=coverage.txt ./...
           go tool cover -func=coverage.txt | go run ./scripts/coveragefloor 29
       - name: Upload coverage profile
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: coverage-${{ matrix.go-version }}
           path: coverage.txt
