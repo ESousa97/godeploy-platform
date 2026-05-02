@@ -142,51 +142,13 @@ func (s *Scheduler) DeployWithOptions(ctx context.Context, app App, opts DeployO
 		return out, err
 	}
 
-	appPort := nat.Port(fmt.Sprintf("%d/tcp", app.InternalPort))
-	hostBinding := nat.PortBinding{HostIP: "0.0.0.0", HostPort: strconv.Itoa(app.InternalPort)}
-
-	// Quando existe versao antiga, usamos porta dinamica no novo container para
-	// evitar downtime durante o overlap do blue-green.
-	if oldContainer != nil {
-		hostBinding.HostPort = ""
-	} else {
-		if conflictErr := s.detectPortConflict(ctx, app.InternalPort); conflictErr != nil {
-			return out, conflictErr
-		}
+	appPort, hostBinding, err := s.resolveHostPortBinding(ctx, app, oldContainer)
+	if err != nil {
+		return out, err
 	}
 
 	newContainerName := fmt.Sprintf("%s-%d", normalizeName(app.Name), time.Now().UnixNano())
-	containerConfig := &container.Config{
-		Image: app.Image,
-		Labels: map[string]string{
-			"godeploy.managed":  "true",
-			"godeploy.app.name": app.Name,
-		},
-		ExposedPorts: nat.PortSet{
-			appPort: {},
-		},
-	}
-
-	hostConfig := &container.HostConfig{
-		Resources: container.Resources{
-			Memory:   app.memoryBytes(),
-			NanoCPUs: app.nanoCPUs(),
-		},
-		PortBindings: nat.PortMap{
-			appPort: []nat.PortBinding{hostBinding},
-		},
-		NetworkMode: container.NetworkMode(s.networkName),
-	}
-
-	networkConfig := &network.NetworkingConfig{
-		EndpointsConfig: map[string]*network.EndpointSettings{
-			s.networkName: {
-				Aliases: []string{
-					fmt.Sprintf("%s-next", normalizeName(app.Name)),
-				},
-			},
-		},
-	}
+	containerConfig, hostConfig, networkConfig := s.deployContainerSpecs(app, appPort, hostBinding)
 
 	createResp, err := s.docker.ContainerCreate(ctx, containerConfig, hostConfig, networkConfig, nil, newContainerName)
 	if err != nil {
@@ -214,28 +176,75 @@ func (s *Scheduler) DeployWithOptions(ctx context.Context, app App, opts DeployO
 	}
 	started = true
 
-	inspect, err := s.docker.ContainerInspect(ctx, createResp.ID)
-	if err == nil {
+	if inspect, ierr := s.docker.ContainerInspect(ctx, createResp.ID); ierr == nil {
 		out.AssignedHostPort = firstPublishedPort(inspect.NetworkSettings.Ports, appPort)
 	}
 
-	if oldContainer != nil {
-		out.OldContainerID = oldContainer.ID
-		if opts.KeepOld {
-			return out, nil
-		}
-
-		timeout := int(defaultStopTimeout.Seconds())
-		if stopErr := s.docker.ContainerStop(ctx, oldContainer.ID, container.StopOptions{Timeout: &timeout}); stopErr != nil && !cerrdefs.IsNotFound(stopErr) {
-			return out, fmt.Errorf("novo container ativo, mas falha ao parar antigo %q: %w", oldContainer.ID, stopErr)
-		}
-
-		if rmErr := s.docker.ContainerRemove(ctx, oldContainer.ID, container.RemoveOptions{Force: true}); rmErr != nil && !cerrdefs.IsNotFound(rmErr) {
-			return out, fmt.Errorf("novo container ativo, mas falha ao remover antigo %q: %w", oldContainer.ID, rmErr)
-		}
+	if err := s.finishOldContainer(ctx, oldContainer, opts, &out); err != nil {
+		return out, err
 	}
 
 	return out, nil
+}
+
+func (s *Scheduler) resolveHostPortBinding(ctx context.Context, app App, oldContainer *container.Summary) (nat.Port, nat.PortBinding, error) {
+	appPort := nat.Port(fmt.Sprintf("%d/tcp", app.InternalPort))
+	hostBinding := nat.PortBinding{HostIP: "0.0.0.0", HostPort: strconv.Itoa(app.InternalPort)}
+	// Quando existe versao antiga, usamos porta dinamica no novo container para
+	// evitar downtime durante o overlap do blue-green.
+	if oldContainer != nil {
+		hostBinding.HostPort = ""
+		return appPort, hostBinding, nil
+	}
+	if conflictErr := s.detectPortConflict(ctx, app.InternalPort); conflictErr != nil {
+		return "", nat.PortBinding{}, conflictErr
+	}
+	return appPort, hostBinding, nil
+}
+
+func (s *Scheduler) deployContainerSpecs(app App, appPort nat.Port, hostBinding nat.PortBinding) (*container.Config, *container.HostConfig, *network.NetworkingConfig) {
+	containerConfig := &container.Config{
+		Image: app.Image,
+		Labels: map[string]string{
+			"godeploy.managed":  "true",
+			"godeploy.app.name": app.Name,
+		},
+		ExposedPorts: nat.PortSet{appPort: {}},
+	}
+	hostConfig := &container.HostConfig{
+		Resources: container.Resources{
+			Memory:   app.memoryBytes(),
+			NanoCPUs: app.nanoCPUs(),
+		},
+		PortBindings: nat.PortMap{appPort: []nat.PortBinding{hostBinding}},
+		NetworkMode:  container.NetworkMode(s.networkName),
+	}
+	networkConfig := &network.NetworkingConfig{
+		EndpointsConfig: map[string]*network.EndpointSettings{
+			s.networkName: {
+				Aliases: []string{fmt.Sprintf("%s-next", normalizeName(app.Name))},
+			},
+		},
+	}
+	return containerConfig, hostConfig, networkConfig
+}
+
+func (s *Scheduler) finishOldContainer(ctx context.Context, oldContainer *container.Summary, opts DeployOptions, out *DeploymentResult) error {
+	if oldContainer == nil {
+		return nil
+	}
+	out.OldContainerID = oldContainer.ID
+	if opts.KeepOld {
+		return nil
+	}
+	timeout := int(defaultStopTimeout.Seconds())
+	if stopErr := s.docker.ContainerStop(ctx, oldContainer.ID, container.StopOptions{Timeout: &timeout}); stopErr != nil && !cerrdefs.IsNotFound(stopErr) {
+		return fmt.Errorf("novo container ativo, mas falha ao parar antigo %q: %w", oldContainer.ID, stopErr)
+	}
+	if rmErr := s.docker.ContainerRemove(ctx, oldContainer.ID, container.RemoveOptions{Force: true}); rmErr != nil && !cerrdefs.IsNotFound(rmErr) {
+		return fmt.Errorf("novo container ativo, mas falha ao remover antigo %q: %w", oldContainer.ID, rmErr)
+	}
+	return nil
 }
 
 func (a App) validate() error {

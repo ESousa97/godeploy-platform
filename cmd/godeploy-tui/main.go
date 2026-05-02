@@ -92,76 +92,92 @@ func (m *model) refresh() error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	// 1. Get routes from DB
-	rows, err := db.QueryContext(ctx, "SELECT domain, target FROM proxy_routes") //nolint:sqlclosecheck // rows closed in defer below
+	domainToTarget, err := loadProxyRoutes(ctx, db)
 	if err != nil {
 		return err
+	}
+
+	containers, err := listManagedContainers(ctx, docker)
+	if err != nil {
+		return err
+	}
+
+	appMap := buildAppMapFromContainers(containers, domainToTarget)
+	rows := make([]table.Row, 0, len(appMap))
+	for _, app := range appMap {
+		rows = append(rows, table.Row{app.Name, app.Domain, app.Status, app.Health})
+	}
+	m.table.SetRows(rows)
+	return nil
+}
+
+func loadProxyRoutes(ctx context.Context, db *sql.DB) (map[string]string, error) {
+	rows, err := db.QueryContext(ctx, "SELECT domain, target FROM proxy_routes") //nolint:sqlclosecheck // rows closed in defer below
+	if err != nil {
+		return nil, err
 	}
 	defer iox.Close(rows)
 
-	domainToTarget := make(map[string]string)
+	out := make(map[string]string)
 	for rows.Next() {
 		var d, t string
 		if scanErr := rows.Scan(&d, &t); scanErr == nil {
-			domainToTarget[d] = t
+			out[d] = t
 		}
 	}
+	return out, nil
+}
 
-	// 2. Get managed containers from Docker
+func listManagedContainers(ctx context.Context, docker *client.Client) ([]container.Summary, error) {
 	args := filters.NewArgs()
 	args.Add("label", "godeploy.managed=true")
-	containers, err := docker.ContainerList(ctx, container.ListOptions{All: true, Filters: args})
-	if err != nil {
-		return err
-	}
+	return docker.ContainerList(ctx, container.ListOptions{All: true, Filters: args})
+}
 
+func buildAppMapFromContainers(containers []container.Summary, domainToTarget map[string]string) map[string]*appInfo {
 	appMap := make(map[string]*appInfo)
-
 	for _, c := range containers {
-		name := c.Labels["godeploy.app.name"]
-		if name == "" {
-			name = strings.TrimPrefix(c.Names[0], "/")
-		}
+		info := containerToAppInfo(c, domainToTarget)
+		mergeAppInfo(appMap, info)
+	}
+	return appMap
+}
 
-		status := c.Status
-		health := healthLabelUnhealthy
-		if strings.Contains(strings.ToLower(c.State), "running") {
-			health = healthLabelHealthy
-		}
+func containerToAppInfo(c container.Summary, domainToTarget map[string]string) *appInfo {
+	name := c.Labels["godeploy.app.name"]
+	if name == "" {
+		name = strings.TrimPrefix(c.Names[0], "/")
+	}
+	status := c.Status
+	health := healthLabelUnhealthy
+	if strings.Contains(strings.ToLower(c.State), "running") {
+		health = healthLabelHealthy
+	}
+	domain := domainForContainerPorts(c, domainToTarget)
+	return &appInfo{Name: name, Domain: domain, Status: status, Health: health}
+}
 
-		// Find domain for this app
-		domain := "-"
-		for d, t := range domainToTarget {
-			// This is a bit heuristic: if target port is in container ports
-			for _, p := range c.Ports {
-				targetPort := fmt.Sprintf(":%d", p.PublicPort)
-				if strings.HasSuffix(t, targetPort) {
-					domain = d
-					break
-				}
+func domainForContainerPorts(c container.Summary, domainToTarget map[string]string) string {
+	for d, t := range domainToTarget {
+		for _, p := range c.Ports {
+			targetPort := fmt.Sprintf(":%d", p.PublicPort)
+			if strings.HasSuffix(t, targetPort) {
+				return d
 			}
-			if domain != "-" {
-				break
-			}
-		}
-
-		if existing, ok := appMap[name]; ok {
-			// If we have multiple containers for the same app name, prefer the running one
-			if health == healthLabelHealthy || existing.Health != healthLabelHealthy {
-				appMap[name] = &appInfo{Name: name, Domain: domain, Status: status, Health: health}
-			}
-		} else {
-			appMap[name] = &appInfo{Name: name, Domain: domain, Status: status, Health: health}
 		}
 	}
+	return "-"
+}
 
-	rows_table := []table.Row{}
-	for _, app := range appMap {
-		rows_table = append(rows_table, table.Row{app.Name, app.Domain, app.Status, app.Health})
+func mergeAppInfo(appMap map[string]*appInfo, info *appInfo) {
+	existing, ok := appMap[info.Name]
+	if !ok {
+		appMap[info.Name] = info
+		return
 	}
-
-	m.table.SetRows(rows_table)
-	return nil
+	if info.Health == healthLabelHealthy || existing.Health != healthLabelHealthy {
+		appMap[info.Name] = info
+	}
 }
 
 func (m model) View() string {

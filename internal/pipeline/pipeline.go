@@ -130,37 +130,12 @@ func New(cfg Config) (*Runner, error) {
 // updates the SQLite route for req.Domain, and removes the previous container on success.
 func (r *Runner) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 	var out RunResult
+	trimRunRequest(&req)
+	if err := r.validateRunRequest(&req); err != nil {
+		return out, err
+	}
+	healthPath := resolvedHealthPath(req.HealthPath, r.cfg.HealthPath)
 
-	req.AppName = strings.TrimSpace(req.AppName)
-	req.Domain = strings.TrimSpace(req.Domain)
-	req.CloneURL = strings.TrimSpace(req.CloneURL)
-	req.Ref = strings.TrimSpace(req.Ref)
-	req.CommitSHA = strings.TrimSpace(req.CommitSHA)
-	req.ImageName = strings.TrimSpace(req.ImageName)
-	req.HealthPath = strings.TrimSpace(req.HealthPath)
-
-	if req.AppName == "" {
-		return out, errors.New("AppName nao pode ser vazio")
-	}
-	if req.Domain == "" {
-		req.Domain = fmt.Sprintf("%s.local", normalizeApp(req.AppName))
-	}
-	if req.CloneURL == "" {
-		return out, errors.New("CloneURL nao pode ser vazio")
-	}
-	if req.ImageName == "" {
-		req.ImageName = fmt.Sprintf("%s/%s", r.cfg.DefaultImagePrefix, normalizeApp(req.AppName))
-	}
-
-	healthPath := req.HealthPath
-	if healthPath == "" {
-		healthPath = r.cfg.HealthPath
-	}
-	if !strings.HasPrefix(healthPath, "/") {
-		healthPath = "/" + healthPath
-	}
-
-	// Snapshot da rota atual (pra rollback).
 	prevTarget, prevOK, err := r.store.GetRoute(ctx, req.Domain)
 	if err != nil {
 		return out, err
@@ -187,29 +162,14 @@ func (r *Runner) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 		return out, err
 	}
 	out.Runtime = detected.Runtime
-
 	internalPort := defaultPortForRuntime(detected.Runtime)
 
-	buildLogs := make(chan string, 256)
-	go func() {
-		for line := range buildLogs {
-			r.cfg.Logger.Info("build", slog.String("app", req.AppName), slog.String("line", line))
-		}
-	}()
-
-	bres, err := r.builder.Build(ctx, builder.Options{
-		RootDir:   tmpDir,
-		ImageName: req.ImageName,
-		Commit:    shortSHA(req.CommitSHA),
-		Logs:      buildLogs,
-		// DockerfilePath vazio: respeita Dockerfile do repo, ou template do runtime.
-	})
+	bres, err := r.runBuildWithLogDrain(ctx, tmpDir, req)
 	if err != nil {
 		return out, err
 	}
 	out.ImageTag = bres.Tag
 
-	// Deploy do novo container mantendo o antigo vivo para healthcheck + rollback.
 	deployRes, err := r.scheduler.DeployWithOptions(ctx, scheduler.App{
 		Name:         req.AppName,
 		Image:        bres.Tag,
@@ -221,59 +181,121 @@ func (r *Runner) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 	out.NewContainerID = deployRes.NewContainerID
 	out.OldContainerID = deployRes.OldContainerID
 
-	newTarget := fmt.Sprintf("127.0.0.1:%s", strings.TrimSpace(deployRes.AssignedHostPort))
-	// Em casos raros AssignedHostPort pode vir vazio (inspect falhou); tentamos fallback.
-	if strings.TrimSpace(deployRes.AssignedHostPort) == "" {
-		fallback, ferr := inferPublishedPort(ctx, r.cfg.Docker, deployRes.NewContainerID, internalPort)
-		if ferr != nil {
-			if rmErr := r.safeRemoveContainer(cleanupCtx, deployRes.NewContainerID); rmErr != nil {
-				r.cfg.Logger.Warn("cleanup new container", slog.Any("err", rmErr))
-			}
-			return out, fmt.Errorf("falha ao resolver porta publicada do novo container: %w", ferr)
-		}
-		newTarget = fmt.Sprintf("127.0.0.1:%s", fallback)
+	newTarget, err := r.resolvePublishedTarget(ctx, deployRes, internalPort, cleanupCtx)
+	if err != nil {
+		return out, err
 	}
 
-	// Faz healthcheck direto no novo target antes de trocar a rota.
 	if err := waitHTTP200(ctx, "http://"+newTarget+healthPath, r.cfg.HealthTimeout); err != nil {
-		if rmErr := r.safeRemoveContainer(cleanupCtx, deployRes.NewContainerID); rmErr != nil {
-			r.cfg.Logger.Warn("cleanup new container", slog.Any("err", rmErr))
-		}
-		// Rota não foi alterada ainda, então rollback é manter como estava.
+		r.warnSafeRemove(cleanupCtx, deployRes.NewContainerID, "cleanup new container")
 		return out, fmt.Errorf("healthcheck falhou: %w", err)
 	}
 
-	// Troca rota do proxy para o novo container.
 	if err := r.store.UpsertRoute(ctx, req.Domain, newTarget); err != nil {
-		if rmErr := r.safeRemoveContainer(cleanupCtx, deployRes.NewContainerID); rmErr != nil {
-			r.cfg.Logger.Warn("cleanup new container", slog.Any("err", rmErr))
-		}
-		// tenta restaurar rota anterior (se existia)
-		if prevOK {
-			if upErr := r.store.UpsertRoute(cleanupCtx, req.Domain, prevTarget); upErr != nil {
-				r.cfg.Logger.Warn("rollback route", slog.Any("err", upErr))
-			}
-		} else {
-			if delErr := r.store.DeleteRoute(cleanupCtx, req.Domain); delErr != nil {
-				r.cfg.Logger.Warn("rollback delete route", slog.Any("err", delErr))
-			}
-		}
+		r.warnSafeRemove(cleanupCtx, deployRes.NewContainerID, "cleanup new container")
+		r.rollbackRoute(cleanupCtx, req.Domain, prevTarget, prevOK)
 		return out, err
 	}
 	out.RoutedTarget = newTarget
 
-	// Agora sim removemos o antigo (blue-green com readiness).
-	if deployRes.OldContainerID != "" {
-		timeout := 15
-		if stopErr := r.cfg.Docker.ContainerStop(ctx, deployRes.OldContainerID, container.StopOptions{Timeout: &timeout}); stopErr != nil {
-			r.cfg.Logger.Warn("stop old container", slog.Any("err", stopErr))
-		}
-		if rmErr := r.safeRemoveContainer(ctx, deployRes.OldContainerID); rmErr != nil {
-			r.cfg.Logger.Warn("remove old container", slog.Any("err", rmErr))
-		}
-	}
-
+	r.stopAndRemoveOldContainer(ctx, deployRes.OldContainerID)
 	return out, nil
+}
+
+func trimRunRequest(req *RunRequest) {
+	req.AppName = strings.TrimSpace(req.AppName)
+	req.Domain = strings.TrimSpace(req.Domain)
+	req.CloneURL = strings.TrimSpace(req.CloneURL)
+	req.Ref = strings.TrimSpace(req.Ref)
+	req.CommitSHA = strings.TrimSpace(req.CommitSHA)
+	req.ImageName = strings.TrimSpace(req.ImageName)
+	req.HealthPath = strings.TrimSpace(req.HealthPath)
+}
+
+func (r *Runner) validateRunRequest(req *RunRequest) error {
+	if req.AppName == "" {
+		return errors.New("AppName nao pode ser vazio")
+	}
+	if req.Domain == "" {
+		req.Domain = fmt.Sprintf("%s.local", normalizeApp(req.AppName))
+	}
+	if req.CloneURL == "" {
+		return errors.New("CloneURL nao pode ser vazio")
+	}
+	if req.ImageName == "" {
+		req.ImageName = fmt.Sprintf("%s/%s", r.cfg.DefaultImagePrefix, normalizeApp(req.AppName))
+	}
+	return nil
+}
+
+func resolvedHealthPath(reqPath, cfgDefault string) string {
+	healthPath := reqPath
+	if healthPath == "" {
+		healthPath = cfgDefault
+	}
+	if !strings.HasPrefix(healthPath, "/") {
+		healthPath = "/" + healthPath
+	}
+	return healthPath
+}
+
+func (r *Runner) runBuildWithLogDrain(ctx context.Context, tmpDir string, req RunRequest) (builder.Result, error) {
+	buildLogs := make(chan string, 256)
+	go func() {
+		for line := range buildLogs {
+			r.cfg.Logger.Info("build", slog.String("app", req.AppName), slog.String("line", line))
+		}
+	}()
+	return r.builder.Build(ctx, builder.Options{
+		RootDir:   tmpDir,
+		ImageName: req.ImageName,
+		Commit:    shortSHA(req.CommitSHA),
+		Logs:      buildLogs,
+	})
+}
+
+func (r *Runner) resolvePublishedTarget(ctx context.Context, deployRes scheduler.DeploymentResult, internalPort int, cleanupCtx context.Context) (string, error) {
+	newTarget := fmt.Sprintf("127.0.0.1:%s", strings.TrimSpace(deployRes.AssignedHostPort))
+	if strings.TrimSpace(deployRes.AssignedHostPort) != "" {
+		return newTarget, nil
+	}
+	fallback, ferr := inferPublishedPort(ctx, r.cfg.Docker, deployRes.NewContainerID, internalPort)
+	if ferr != nil {
+		r.warnSafeRemove(cleanupCtx, deployRes.NewContainerID, "cleanup new container")
+		return "", fmt.Errorf("falha ao resolver porta publicada do novo container: %w", ferr)
+	}
+	return fmt.Sprintf("127.0.0.1:%s", fallback), nil
+}
+
+func (r *Runner) warnSafeRemove(ctx context.Context, id, logKey string) {
+	if rmErr := r.safeRemoveContainer(ctx, id); rmErr != nil {
+		r.cfg.Logger.Warn(logKey, slog.Any("err", rmErr))
+	}
+}
+
+func (r *Runner) rollbackRoute(cleanupCtx context.Context, domain, prevTarget string, prevOK bool) {
+	if prevOK {
+		if upErr := r.store.UpsertRoute(cleanupCtx, domain, prevTarget); upErr != nil {
+			r.cfg.Logger.Warn("rollback route", slog.Any("err", upErr))
+		}
+		return
+	}
+	if delErr := r.store.DeleteRoute(cleanupCtx, domain); delErr != nil {
+		r.cfg.Logger.Warn("rollback delete route", slog.Any("err", delErr))
+	}
+}
+
+func (r *Runner) stopAndRemoveOldContainer(ctx context.Context, oldID string) {
+	if oldID == "" {
+		return
+	}
+	timeout := 15
+	if stopErr := r.cfg.Docker.ContainerStop(ctx, oldID, container.StopOptions{Timeout: &timeout}); stopErr != nil {
+		r.cfg.Logger.Warn("stop old container", slog.Any("err", stopErr))
+	}
+	if rmErr := r.safeRemoveContainer(ctx, oldID); rmErr != nil {
+		r.cfg.Logger.Warn("remove old container", slog.Any("err", rmErr))
+	}
 }
 
 func (r *Runner) safeRemoveContainer(ctx context.Context, id string) error {

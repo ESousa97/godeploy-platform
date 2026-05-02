@@ -67,55 +67,18 @@ func New(docker *client.Client) (*Builder, error) {
 // and a short commit suffix when git metadata is available.
 func (b *Builder) Build(ctx context.Context, opts Options) (Result, error) {
 	var out Result
-
-	opts.RootDir = strings.TrimSpace(opts.RootDir)
-	opts.ImageName = strings.TrimSpace(opts.ImageName)
-	opts.DockerfilePath = strings.TrimSpace(opts.DockerfilePath)
-	opts.Commit = strings.TrimSpace(opts.Commit)
-
-	if opts.RootDir == "" {
-		return out, errors.New("RootDir nao pode ser vazio")
-	}
-	if opts.ImageName == "" {
-		return out, errors.New("ImageName nao pode ser vazio")
+	normalizeBuildOptions(&opts)
+	if err := validateAndAbsolutizeRoot(&opts); err != nil {
+		return out, err
 	}
 
-	rootInfo, err := os.Stat(opts.RootDir)
+	rt, err := detectBuildRuntime(opts)
 	if err != nil {
-		return out, fmt.Errorf("falha ao acessar RootDir: %w", err)
-	}
-	if !rootInfo.IsDir() {
-		return out, fmt.Errorf("RootDir nao e diretorio: %s", opts.RootDir)
-	}
-
-	rootAbs, err := filepath.Abs(opts.RootDir)
-	if err != nil {
-		return out, fmt.Errorf("falha ao resolver RootDir absoluto: %w", err)
-	}
-	opts.RootDir = rootAbs
-
-	var rt detector.Runtime
-	if opts.DockerfilePath != "" || fileExists(filepath.Join(opts.RootDir, "Dockerfile")) {
-		rt = detector.RuntimeDockerfile
-	} else {
-		detected, derr := detector.Detect(opts.RootDir)
-		if derr != nil {
-			return out, derr
-		}
-		rt = detected.Runtime
+		return out, err
 	}
 	out.Runtime = rt
 
-	commit := opts.Commit
-	if commit == "" {
-		commit = gitShortSHA(ctx, opts.RootDir)
-		if commit == "" {
-			commit = "nogit"
-		}
-	}
-
-	ts := time.Now().UTC().Format("20060102-150405")
-	out.Tag = fmt.Sprintf("%s:%s-%s", opts.ImageName, ts, commit)
+	out.Tag = imageTagForBuild(ctx, opts)
 
 	logs := opts.Logs
 	if logs != nil {
@@ -137,9 +100,65 @@ func (b *Builder) Build(ctx context.Context, opts Options) (Result, error) {
 		return out, err
 	}
 
+	return b.runDockerImageBuild(ctx, out, dfNameInContext, opts.Logs, ctxReader)
+}
+
+func normalizeBuildOptions(opts *Options) {
+	opts.RootDir = strings.TrimSpace(opts.RootDir)
+	opts.ImageName = strings.TrimSpace(opts.ImageName)
+	opts.DockerfilePath = strings.TrimSpace(opts.DockerfilePath)
+	opts.Commit = strings.TrimSpace(opts.Commit)
+}
+
+func validateAndAbsolutizeRoot(opts *Options) error {
+	if opts.RootDir == "" {
+		return errors.New("RootDir nao pode ser vazio")
+	}
+	if opts.ImageName == "" {
+		return errors.New("ImageName nao pode ser vazio")
+	}
+	rootInfo, err := os.Stat(opts.RootDir)
+	if err != nil {
+		return fmt.Errorf("falha ao acessar RootDir: %w", err)
+	}
+	if !rootInfo.IsDir() {
+		return fmt.Errorf("RootDir nao e diretorio: %s", opts.RootDir)
+	}
+	rootAbs, err := filepath.Abs(opts.RootDir)
+	if err != nil {
+		return fmt.Errorf("falha ao resolver RootDir absoluto: %w", err)
+	}
+	opts.RootDir = rootAbs
+	return nil
+}
+
+func detectBuildRuntime(opts Options) (detector.Runtime, error) {
+	if opts.DockerfilePath != "" || fileExists(filepath.Join(opts.RootDir, "Dockerfile")) {
+		return detector.RuntimeDockerfile, nil
+	}
+	detected, err := detector.Detect(opts.RootDir)
+	if err != nil {
+		return "", err
+	}
+	return detected.Runtime, nil
+}
+
+func imageTagForBuild(ctx context.Context, opts Options) string {
+	commit := opts.Commit
+	if commit == "" {
+		commit = gitShortSHA(ctx, opts.RootDir)
+		if commit == "" {
+			commit = "nogit"
+		}
+	}
+	ts := time.Now().UTC().Format("20060102-150405")
+	return fmt.Sprintf("%s:%s-%s", opts.ImageName, ts, commit)
+}
+
+func (b *Builder) runDockerImageBuild(ctx context.Context, out Result, dfName string, logs chan<- string, ctxReader io.Reader) (Result, error) {
 	buildResp, err := b.docker.ImageBuild(ctx, ctxReader, build.ImageBuildOptions{
 		Tags:       []string{out.Tag},
-		Dockerfile: dfNameInContext,
+		Dockerfile: dfName,
 		Remove:     true,
 	})
 	if err != nil {
@@ -153,11 +172,9 @@ func (b *Builder) Build(ctx context.Context, opts Options) (Result, error) {
 		}
 		return out, nil
 	}
-
 	if err := streamDockerBuildLogs(buildResp.Body, logs); err != nil {
 		return out, err
 	}
-
 	return out, nil
 }
 
@@ -259,100 +276,92 @@ func createBuildContextTar(rootDir, dockerfileName, dockerfileContents string) (
 
 	// Injeta Dockerfile (template ou fornecido).
 	if err := writeTarFile(tw, dockerfileName, []byte(dockerfileContents), 0o644); err != nil {
-		if cerr := tw.Close(); cerr != nil {
-			return nil, fmt.Errorf("%w: %w", err, cerr)
-		}
-		return nil, err
-	}
-
-	excludes := []string{
-		".git",
-		".idea",
-		".vscode",
-		"node_modules",
-	}
-
-	shouldSkip := func(rel string) bool {
-		rel = filepath.ToSlash(strings.TrimPrefix(rel, "./"))
-		for _, ex := range excludes {
-			if rel == ex || strings.HasPrefix(rel, ex+"/") {
-				return true
-			}
-		}
-		// Evita sobrescrever o Dockerfile injetado.
-		if strings.EqualFold(filepath.Base(rel), dockerfileName) {
-			return true
-		}
-		return false
+		return nil, closeTarWriterCombiningErr(tw, err)
 	}
 
 	root, err := os.OpenRoot(rootDir)
 	if err != nil {
-		if cerr := tw.Close(); cerr != nil {
-			return nil, fmt.Errorf("%w: %w", err, cerr)
-		}
-		return nil, fmt.Errorf("falha ao abrir rootDir: %w", err)
+		return nil, closeTarWriterCombiningErr(tw, fmt.Errorf("falha ao abrir rootDir: %w", err))
 	}
 	defer iox.Close(root)
 
-	err = filepath.WalkDir(rootDir, func(path string, d fs.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
-		}
-		rel, err := filepath.Rel(rootDir, path)
-		if err != nil {
-			return err
-		}
-		if rel == "." {
-			return nil
-		}
-		if shouldSkip(rel) {
-			if d.IsDir() {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if d.IsDir() {
-			return nil
-		}
-
-		info, err := d.Info()
-		if err != nil {
-			return err
-		}
-		if info.Mode()&os.ModeSymlink != 0 {
-			// Mantém simples/portável: ignora symlinks no contexto.
-			return nil
-		}
-
-		// Evita leitura via path absoluto do callback (gosec G122/G304):
-		// sempre abre o arquivo relativo ao RootDir, de forma "root-scoped".
-		rel = filepath.ToSlash(filepath.Clean(rel))
-		rel = strings.TrimPrefix(rel, "./")
-		f, err := root.Open(rel)
-		if err != nil {
-			return err
-		}
-		b, rerr := io.ReadAll(f)
-		iox.Close(f)
-		if rerr != nil {
-			return rerr
-		}
-
-		return writeTarFile(tw, rel, b, info.Mode())
-	})
-	if err != nil {
-		if cerr := tw.Close(); cerr != nil {
-			return nil, fmt.Errorf("%w: %w", err, cerr)
-		}
-		return nil, fmt.Errorf("falha ao montar contexto: %w", err)
+	if err := walkDirIntoTar(tw, root, rootDir, dockerfileName); err != nil {
+		return nil, closeTarWriterCombiningErr(tw, fmt.Errorf("falha ao montar contexto: %w", err))
 	}
 
 	if err := tw.Close(); err != nil {
 		return nil, err
 	}
-
 	return bytes.NewReader(buf.Bytes()), nil
+}
+
+func closeTarWriterCombiningErr(tw *tar.Writer, err error) error {
+	if cerr := tw.Close(); cerr != nil {
+		return fmt.Errorf("%w: %w", err, cerr)
+	}
+	return err
+}
+
+var defaultTarExcludes = []string{".git", ".idea", ".vscode", "node_modules"}
+
+func tarContextSkipRel(rel, dockerfileName string, excludes []string) bool {
+	rel = filepath.ToSlash(strings.TrimPrefix(rel, "./"))
+	for _, ex := range excludes {
+		if rel == ex || strings.HasPrefix(rel, ex+"/") {
+			return true
+		}
+	}
+	return strings.EqualFold(filepath.Base(rel), dockerfileName)
+}
+
+func walkDirIntoTar(tw *tar.Writer, root *os.Root, rootDir, dockerfileName string) error {
+	shouldSkip := func(rel string) bool {
+		return tarContextSkipRel(rel, dockerfileName, defaultTarExcludes)
+	}
+	return filepath.WalkDir(rootDir, func(path string, d fs.DirEntry, walkErr error) error {
+		return tarWalkEntry(tw, root, rootDir, path, d, walkErr, shouldSkip)
+	})
+}
+
+func tarWalkEntry(tw *tar.Writer, root *os.Root, rootDir, path string, d fs.DirEntry, walkErr error, shouldSkip func(string) bool) error {
+	if walkErr != nil {
+		return walkErr
+	}
+	rel, err := filepath.Rel(rootDir, path)
+	if err != nil {
+		return err
+	}
+	if rel == "." {
+		return nil
+	}
+	if shouldSkip(rel) {
+		if d.IsDir() {
+			return filepath.SkipDir
+		}
+		return nil
+	}
+	if d.IsDir() {
+		return nil
+	}
+	info, err := d.Info()
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return nil
+	}
+	rel = filepath.ToSlash(filepath.Clean(rel))
+	rel = strings.TrimPrefix(rel, "./")
+	f, err := root.Open(rel)
+	if err != nil {
+		return err
+	}
+	body, rerr := io.ReadAll(f)
+	iox.Close(f)
+	if rerr != nil {
+		return rerr
+	}
+	return writeTarFile(tw, rel, body, info.Mode())
 }
 
 func readFileUnderRoot(rootDir string, root *os.Root, path string) ([]byte, error) {
