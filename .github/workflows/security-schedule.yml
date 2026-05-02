@@ -12,8 +12,6 @@ permissions:
 jobs:
   govulncheck:
     runs-on: ubuntu-latest
-    # Same policy as ci.yml vulncheck: visible signal without blocking while upstream OSVs lack fixed tags.
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -21,4 +19,4 @@ jobs:
           go-version-file: go.mod
           cache: true
       - name: govulncheck
-        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+        run: go run ./scripts/govulncheckci ./...

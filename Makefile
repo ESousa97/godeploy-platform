@@ -95,9 +95,9 @@ clean:
 lint:
 	golangci-lint run ./...
 
-## vulncheck: Run govulncheck
+## vulncheck: Run govulncheck (via scripts/govulncheckci; same policy as CI)
 vulncheck:
-	govulncheck ./...
+	$(GO) run ./scripts/govulncheckci ./...
 
 ## sec: Run gosec (static security)
 sec:

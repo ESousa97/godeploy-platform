@@ -28,8 +28,6 @@ jobs:
 
   vulncheck:
     runs-on: ubuntu-latest
-    # Runs on every push/PR; does not block merge while moby/docker OSVs list no fixed module tag yet (see go.sum).
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -37,7 +35,7 @@ jobs:
           go-version-file: go.mod
           cache: true
       - name: govulncheck
-        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+        run: go run ./scripts/govulncheckci ./...
 
   verify:
     runs-on: ubuntu-latest
