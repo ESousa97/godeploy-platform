@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 # Build godeployd (HTTP API + webhook + proxy wiring). Mount Docker socket at runtime.
-FROM golang:1.24-bookworm AS build
+FROM golang:1.26-bookworm AS build
 WORKDIR /src
 ENV GOTOOLCHAIN=auto
 COPY go.mod go.sum ./
